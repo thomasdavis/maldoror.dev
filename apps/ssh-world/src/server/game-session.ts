@@ -204,10 +204,14 @@ export class GameSession {
       };
       this.tileProvider.updatePlayer(state);
 
-      // Set placeholder sprite if needed
+      // Load sprite if not already loaded
       if (!this.tileProvider.getPlayerSprite(player.userId)) {
+        // Set placeholder immediately for rendering
         const color = this.getPlayerColor(player.userId);
         this.tileProvider.setPlayerSprite(player.userId, createPlaceholderSprite(color));
+
+        // Load actual sprite from database asynchronously
+        this.loadPlayerSprite(player.userId);
       }
     }
 
@@ -364,6 +368,25 @@ export class GameSession {
       }
     } catch (error) {
       console.error(`Failed to reload sprite for ${changedUserId}:`, error);
+    }
+  }
+
+  /**
+   * Load sprite for another player from database
+   */
+  private async loadPlayerSprite(playerId: string): Promise<void> {
+    if (!this.tileProvider) return;
+
+    try {
+      const avatar = await db.query.avatars.findFirst({
+        where: eq(schema.avatars.userId, playerId),
+      });
+
+      if (avatar?.spriteJson) {
+        this.tileProvider.setPlayerSprite(playerId, avatar.spriteJson as Sprite);
+      }
+    } catch (error) {
+      console.error(`Failed to load sprite for ${playerId}:`, error);
     }
   }
 
