@@ -40,12 +40,13 @@ export class AvatarScreen {
   private progressStep: string = '';
   private progressCurrent: number = 0;
   private progressTotal: number = 8;
+  private isGenerating: boolean = false;
 
   constructor(config: AvatarScreenConfig) {
     this.stream = config.stream;
     this.ansi = new ANSIBuilder();
     this.prompt = config.currentPrompt ?? '';
-    this.inputBuffer = this.prompt;
+    this.inputBuffer = ''; // Start with empty input - user types fresh prompt
     this.providerConfig = config.providerConfig;
     this.username = config.username ?? 'unknown';
   }
@@ -70,67 +71,68 @@ export class AvatarScreen {
       const onData = async (data: Buffer) => {
         if (this.destroyed) return;
 
-        for (const byte of data) {
-          // Handle Escape key
-          if (byte === 0x1b && data.length === 1) {
+        // Skip escape sequences (arrow keys, etc) - they start with ESC and have multiple bytes
+        if (data[0] === 0x1b && data.length > 1) {
+          return;
+        }
+
+        // Handle Escape key (single ESC byte)
+        if (data[0] === 0x1b && data.length === 1) {
+          this.cleanup();
+          this.stream.removeListener('data', onData);
+          resolve({ action: 'cancel' });
+          return;
+        }
+
+        // Handle Ctrl+C
+        if (data[0] === 0x03) {
+          this.cleanup();
+          this.stream.removeListener('data', onData);
+          resolve({ action: 'cancel' });
+          return;
+        }
+
+        // Process only the first byte for simple input
+        const byte = data[0]!;
+
+        if (this.state === 'input') {
+          if (byte === 0x0d || byte === 0x0a) {
+            // Enter - start generation
+            if (this.inputBuffer.trim().length > 0) {
+              this.prompt = this.inputBuffer.trim();
+              await this.startGeneration();
+            }
+          } else if (byte === 0x7f || byte === 0x08) {
+            // Backspace
+            if (this.inputBuffer.length > 0) {
+              this.inputBuffer = this.inputBuffer.slice(0, -1);
+              this.renderInputOnly();
+            }
+          } else if (byte >= 0x20 && byte < 0x7f) {
+            // Printable character
+            if (this.inputBuffer.length < 200) {
+              this.inputBuffer += String.fromCharCode(byte);
+              this.renderInputOnly();
+            }
+          }
+        } else if (this.state === 'preview') {
+          if (byte === 0x0d || byte === 0x0a) {
+            // Enter - confirm
             this.cleanup();
             this.stream.removeListener('data', onData);
-            resolve({ action: 'cancel' });
+            resolve({
+              action: 'confirm',
+              sprite: this.sprite!,
+              prompt: this.prompt,
+            });
             return;
           }
-
-          // Handle Ctrl+C
-          if (byte === 0x03) {
-            this.cleanup();
-            this.stream.removeListener('data', onData);
-            resolve({ action: 'cancel' });
-            return;
-          }
-
-          if (this.state === 'input') {
-            if (byte === 0x0d || byte === 0x0a) {
-              // Enter - start generation
-              if (this.inputBuffer.trim().length > 0) {
-                this.prompt = this.inputBuffer.trim();
-                await this.startGeneration();
-              }
-            } else if (byte === 0x7f || byte === 0x08) {
-              // Backspace
-              if (this.inputBuffer.length > 0) {
-                this.inputBuffer = this.inputBuffer.slice(0, -1);
-                this.render();
-              }
-            } else if (byte >= 0x20 && byte < 0x7f) {
-              // Printable character
-              if (this.inputBuffer.length < 200) {
-                this.inputBuffer += String.fromCharCode(byte);
-                this.render();
-              }
-            }
-          } else if (this.state === 'preview') {
-            if (byte === 0x0d || byte === 0x0a) {
-              // Enter - confirm
-              this.cleanup();
-              this.stream.removeListener('data', onData);
-              resolve({
-                action: 'confirm',
-                sprite: this.sprite!,
-                prompt: this.prompt,
-              });
-              return;
-            } else if (byte === 0x72 || byte === 0x52) {
-              // 'r' or 'R' - regenerate
-              this.state = 'input';
-              this.sprite = null;
-              this.render();
-            }
-          } else if (this.state === 'error') {
-            if (byte === 0x72 || byte === 0x52) {
-              // 'r' or 'R' - retry
-              this.state = 'input';
-              this.errorMessage = '';
-              this.render();
-            }
+        } else if (this.state === 'error') {
+          if (byte === 0x72 || byte === 0x52) {
+            // 'r' or 'R' - retry
+            this.state = 'input';
+            this.errorMessage = '';
+            this.render();
           }
         }
       };
@@ -140,6 +142,10 @@ export class AvatarScreen {
   }
 
   private async startGeneration(): Promise<void> {
+    // Guard against multiple simultaneous generation attempts
+    if (this.isGenerating) return;
+    this.isGenerating = true;
+
     this.state = 'generating';
     this.startSpinner();
     this.render();
@@ -162,6 +168,7 @@ export class AvatarScreen {
       });
 
       this.stopSpinner();
+      this.isGenerating = false;
 
       if (result.success && result.sprite) {
         this.sprite = result.sprite;
@@ -172,6 +179,7 @@ export class AvatarScreen {
       }
     } catch (error) {
       this.stopSpinner();
+      this.isGenerating = false;
       this.errorMessage = error instanceof Error ? error.message : 'Unknown error';
       this.state = 'error';
     }
@@ -308,6 +316,11 @@ export class AvatarScreen {
   private renderInputState(): void {
     const x = 8;
 
+    // Input text (truncate if too long) - calculate early for cursor positioning
+    const displayText = this.inputBuffer.length > 50
+      ? this.inputBuffer.slice(-50)
+      : this.inputBuffer;
+
     // Instructions
     this.stream.write(
       this.ansi
@@ -334,11 +347,6 @@ export class AvatarScreen {
         .build()
     );
 
-    // Input text (truncate if too long)
-    const displayText = this.inputBuffer.length > 50
-      ? this.inputBuffer.slice(-50)
-      : this.inputBuffer;
-
     // Clear the input area first, then write text
     this.stream.write(
       this.ansi
@@ -347,7 +355,7 @@ export class AvatarScreen {
         .moveTo(x + 2, 8)
         .setForeground({ type: 'rgb', value: [255, 255, 255] })
         .write(displayText)
-        .showCursor()
+        .resetAttributes()
         .build()
     );
 
@@ -381,6 +389,31 @@ export class AvatarScreen {
         .write(' Cancel')
         .resetAttributes()
         .build()
+    );
+
+    // Position cursor at end of input text
+    const cursorX = x + 2 + displayText.length;
+    this.stream.write(
+      this.ansi
+        .moveTo(cursorX, 8)
+        .showCursor()
+        .build()
+    );
+  }
+
+  /**
+   * Update only the input text line - minimal update to prevent flicker
+   */
+  private renderInputOnly(): void {
+    const x = 8;
+    const displayText = this.inputBuffer.length > 50
+      ? this.inputBuffer.slice(-50)
+      : this.inputBuffer;
+    const padded = displayText.padEnd(50, ' ');
+
+    // Single write: move to position, set colors, write padded text, position cursor
+    this.stream.write(
+      `\x1b[9;${x + 3}H\x1b[48;2;20;20;25m\x1b[38;2;255;255;255m${padded}\x1b[9;${x + 3 + displayText.length}H`
     );
   }
 
@@ -486,10 +519,6 @@ export class AvatarScreen {
         .write('[Enter]')
         .setForeground({ type: 'rgb', value: [180, 180, 180] })
         .write(' Confirm  ')
-        .setForeground({ type: 'rgb', value: [255, 200, 100] })
-        .write('[R]')
-        .setForeground({ type: 'rgb', value: [180, 180, 180] })
-        .write(' Regenerate  ')
         .setForeground({ type: 'rgb', value: [200, 100, 100] })
         .write('[Esc]')
         .setForeground({ type: 'rgb', value: [180, 180, 180] })

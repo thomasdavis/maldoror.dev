@@ -106,6 +106,7 @@ export interface ImageSpriteGenerationOptions {
   description: string;
   apiKey: string;
   model?: 'dall-e-3' | 'dall-e-2' | 'gpt-image-1';
+  quality?: 'low' | 'medium' | 'high' | 'auto';
   username?: string;
   onProgress?: (step: string, current: number, total: number) => void;
 }
@@ -124,12 +125,14 @@ async function generateSingleImage(
   openai: OpenAI,
   model: string,
   prompt: string,
+  quality: 'low' | 'medium' | 'high' | 'auto',
   referencePngBuffer?: Buffer
 ): Promise<Buffer> {
   const common = {
     model,
     prompt,
     size: '1024x1024' as const,
+    quality,
     background: 'transparent' as const,
   };
 
@@ -139,6 +142,16 @@ async function generateSingleImage(
         image: await toFile(referencePngBuffer, 'ref.png', { type: 'image/png' }),
       })
     : await openai.images.generate(common);
+
+  // Log full response for debugging (excluding base64 data which is huge)
+  const debugResult = {
+    ...result,
+    data: result.data?.map(item => ({
+      ...item,
+      b64_json: item.b64_json ? `[${item.b64_json.length} chars]` : undefined,
+    })),
+  };
+  console.log('[IMAGE GEN RESPONSE]', JSON.stringify(debugResult, null, 2));
 
   const b64 = result.data?.[0]?.b64_json;
   if (!b64) {
@@ -194,7 +207,7 @@ async function pixelateImageAllResolutions(imageBuffer: Buffer): Promise<Record<
 export async function generateImageSprite(
   options: ImageSpriteGenerationOptions
 ): Promise<ImageSpriteGenerationResult> {
-  const { description, apiKey, model = 'gpt-image-1', username = 'unknown', onProgress } = options;
+  const { description, apiKey, model = 'gpt-image-1', quality = 'high', username = 'unknown', onProgress } = options;
 
   const openai = new OpenAI({ apiKey });
 
@@ -220,77 +233,85 @@ export async function generateImageSprite(
     // Reference prompt for consistency
     const refNote = `\nIMPORTANT: Match the EXACT same character from the reference image. Same clothing, hair, colors, style. Keep smooth detailed art style, NOT pixel art. Ensure ENTIRE character is visible, no cropping.`;
 
-    // Store original high-res images
+    // Store original images
     const originals: Map<string, Buffer> = new Map();
 
-    // Step 1: Generate down/front standing (facing camera, walking toward bottom of screen)
+    // Step 1: Generate down/front standing FIRST (sync - needed as reference for others)
     progress('Generating down view (standing)', 1, 8);
     const downStandingPrompt = `${basePrompt}\nTop-down RPG view: Character facing DOWN (toward the camera/bottom of screen). Standing idle pose. We see the top of their head and front of body.`;
-    const downStandingOriginal = await generateSingleImage(openai, model, downStandingPrompt);
+    const downStandingOriginal = await generateSingleImage(openai, model, downStandingPrompt, quality);
     originals.set('1_down_standing', downStandingOriginal);
-    fs.writeFileSync(path.join(debugDir, '1_down_standing_original_1024.png'), downStandingOriginal);
+    fs.writeFileSync(path.join(debugDir, '1_down_standing_original.png'), downStandingOriginal);
 
-    // Step 2: Generate up/back standing (facing away, walking toward top of screen)
-    progress('Generating up view (standing)', 2, 8);
+    // Steps 2-8: Generate remaining 7 images IN PARALLEL (using down standing as reference)
+    progress('Generating remaining views (parallel)', 2, 8);
+
     const upStandingPrompt = `${basePrompt}\nTop-down RPG view: Character facing UP (away from camera/top of screen). Standing idle pose. We see the back of their head and back of body.${refNote}`;
-    const upStandingOriginal = await generateSingleImage(openai, model, upStandingPrompt, downStandingOriginal);
-    originals.set('2_up_standing', upStandingOriginal);
-    fs.writeFileSync(path.join(debugDir, '2_up_standing_original_1024.png'), upStandingOriginal);
-
-    // Step 3: Generate left standing (facing left side of screen)
-    progress('Generating left view (standing)', 3, 8);
     const leftStandingPrompt = `${basePrompt}\nTop-down RPG view: Character facing LEFT (left side of screen). Standing idle pose. We see the left side profile.${refNote}`;
-    const leftStandingOriginal = await generateSingleImage(openai, model, leftStandingPrompt, downStandingOriginal);
-    originals.set('3_left_standing', leftStandingOriginal);
-    fs.writeFileSync(path.join(debugDir, '3_left_standing_original_1024.png'), leftStandingOriginal);
-
-    // Step 4: Generate right standing (facing right side of screen)
-    progress('Generating right view (standing)', 4, 8);
     const rightStandingPrompt = `${basePrompt}\nTop-down RPG view: Character facing RIGHT (right side of screen). Standing idle pose. We see the right side profile.${refNote}`;
-    const rightStandingOriginal = await generateSingleImage(openai, model, rightStandingPrompt, downStandingOriginal);
-    originals.set('4_right_standing', rightStandingOriginal);
-    fs.writeFileSync(path.join(debugDir, '4_right_standing_original_1024.png'), rightStandingOriginal);
-
-    // Step 5: Generate down walking
-    progress('Generating down view (walking)', 5, 8);
     const downWalkingPrompt = `${basePrompt}\nTop-down RPG view: Character facing DOWN, mid-walk pose with one leg forward.${refNote}`;
-    const downWalkingOriginal = await generateSingleImage(openai, model, downWalkingPrompt, downStandingOriginal);
-    originals.set('5_down_walking', downWalkingOriginal);
-    fs.writeFileSync(path.join(debugDir, '5_down_walking_original_1024.png'), downWalkingOriginal);
-
-    // Step 6: Generate up walking
-    progress('Generating up view (walking)', 6, 8);
     const upWalkingPrompt = `${basePrompt}\nTop-down RPG view: Character facing UP (showing back), mid-walk pose with one leg forward.${refNote}`;
-    const upWalkingOriginal = await generateSingleImage(openai, model, upWalkingPrompt, downStandingOriginal);
-    originals.set('6_up_walking', upWalkingOriginal);
-    fs.writeFileSync(path.join(debugDir, '6_up_walking_original_1024.png'), upWalkingOriginal);
-
-    // Step 7: Generate left walking
-    progress('Generating left view (walking)', 7, 8);
     const leftWalkingPrompt = `${basePrompt}\nTop-down RPG view: Character facing LEFT, mid-walk pose with one leg forward.${refNote}`;
-    const leftWalkingOriginal = await generateSingleImage(openai, model, leftWalkingPrompt, downStandingOriginal);
-    originals.set('7_left_walking', leftWalkingOriginal);
-    fs.writeFileSync(path.join(debugDir, '7_left_walking_original_1024.png'), leftWalkingOriginal);
-
-    // Step 8: Generate right walking
-    progress('Generating right view (walking)', 8, 8);
     const rightWalkingPrompt = `${basePrompt}\nTop-down RPG view: Character facing RIGHT, mid-walk pose with one leg forward.${refNote}`;
-    const rightWalkingOriginal = await generateSingleImage(openai, model, rightWalkingPrompt, downStandingOriginal);
+
+    const [
+      upStandingOriginal,
+      leftStandingOriginal,
+      rightStandingOriginal,
+      downWalkingOriginal,
+      upWalkingOriginal,
+      leftWalkingOriginal,
+      rightWalkingOriginal,
+    ] = await Promise.all([
+      generateSingleImage(openai, model, upStandingPrompt, quality, downStandingOriginal),
+      generateSingleImage(openai, model, leftStandingPrompt, quality, downStandingOriginal),
+      generateSingleImage(openai, model, rightStandingPrompt, quality, downStandingOriginal),
+      generateSingleImage(openai, model, downWalkingPrompt, quality, downStandingOriginal),
+      generateSingleImage(openai, model, upWalkingPrompt, quality, downStandingOriginal),
+      generateSingleImage(openai, model, leftWalkingPrompt, quality, downStandingOriginal),
+      generateSingleImage(openai, model, rightWalkingPrompt, quality, downStandingOriginal),
+    ]);
+
+    // Save parallel-generated originals
+    originals.set('2_up_standing', upStandingOriginal);
+    originals.set('3_left_standing', leftStandingOriginal);
+    originals.set('4_right_standing', rightStandingOriginal);
+    originals.set('5_down_walking', downWalkingOriginal);
+    originals.set('6_up_walking', upWalkingOriginal);
+    originals.set('7_left_walking', leftWalkingOriginal);
     originals.set('8_right_walking', rightWalkingOriginal);
-    fs.writeFileSync(path.join(debugDir, '8_right_walking_original_1024.png'), rightWalkingOriginal);
+
+    fs.writeFileSync(path.join(debugDir, '2_up_standing_original.png'), upStandingOriginal);
+    fs.writeFileSync(path.join(debugDir, '3_left_standing_original.png'), leftStandingOriginal);
+    fs.writeFileSync(path.join(debugDir, '4_right_standing_original.png'), rightStandingOriginal);
+    fs.writeFileSync(path.join(debugDir, '5_down_walking_original.png'), downWalkingOriginal);
+    fs.writeFileSync(path.join(debugDir, '6_up_walking_original.png'), upWalkingOriginal);
+    fs.writeFileSync(path.join(debugDir, '7_left_walking_original.png'), leftWalkingOriginal);
+    fs.writeFileSync(path.join(debugDir, '8_right_walking_original.png'), rightWalkingOriginal);
 
     // Now pixelate all images at all resolutions
     progress('Pixelating images at all resolutions', 8, 8);
 
     // Generate all resolutions for each direction/pose
-    const downStandingRes = await pixelateImageAllResolutions(downStandingOriginal);
-    const upStandingRes = await pixelateImageAllResolutions(upStandingOriginal);
-    const leftStandingRes = await pixelateImageAllResolutions(leftStandingOriginal);
-    const rightStandingRes = await pixelateImageAllResolutions(rightStandingOriginal);
-    const downWalkingRes = await pixelateImageAllResolutions(downWalkingOriginal);
-    const upWalkingRes = await pixelateImageAllResolutions(upWalkingOriginal);
-    const leftWalkingRes = await pixelateImageAllResolutions(leftWalkingOriginal);
-    const rightWalkingRes = await pixelateImageAllResolutions(rightWalkingOriginal);
+    const [
+      downStandingRes,
+      upStandingRes,
+      leftStandingRes,
+      rightStandingRes,
+      downWalkingRes,
+      upWalkingRes,
+      leftWalkingRes,
+      rightWalkingRes,
+    ] = await Promise.all([
+      pixelateImageAllResolutions(downStandingOriginal),
+      pixelateImageAllResolutions(upStandingOriginal),
+      pixelateImageAllResolutions(leftStandingOriginal),
+      pixelateImageAllResolutions(rightStandingOriginal),
+      pixelateImageAllResolutions(downWalkingOriginal),
+      pixelateImageAllResolutions(upWalkingOriginal),
+      pixelateImageAllResolutions(leftWalkingOriginal),
+      pixelateImageAllResolutions(rightWalkingOriginal),
+    ]);
 
     // Save pixelated versions for debugging (just the base size)
     const baseSize = String(BASE_SIZE);
