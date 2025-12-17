@@ -1,6 +1,18 @@
-version: '3.8'
-
 services:
+  haproxy:
+    image: haproxy:2.9-alpine
+    restart: unless-stopped
+    ports:
+      - "22:22"      # Game SSH (users connect here)
+      - "8404:8404"  # Stats dashboard
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      ssh-world:
+        condition: service_healthy
+    networks:
+      - maldoror
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -16,14 +28,17 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - maldoror
 
   ssh-world:
     build:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
-    ports:
-      - "2222:2222"
+    # No external ports - HAProxy handles external traffic
+    expose:
+      - "2222"
     env_file:
       - ../.env
     environment:
@@ -36,7 +51,22 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Health check for HAProxy (using node since BusyBox nc doesn't have -z)
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('net').createConnection(2222,'localhost').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\""]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    # Graceful shutdown - wait for connections to drain
+    stop_grace_period: 5m
+    networks:
+      - maldoror
 
 volumes:
   postgres_data:
   ssh_keys:
+
+networks:
+  maldoror:
+    driver: bridge

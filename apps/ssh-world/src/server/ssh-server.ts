@@ -57,6 +57,17 @@ export class SSHServer {
     });
   }
 
+  /**
+   * Stop accepting new connections but keep existing sessions alive
+   */
+  stopAccepting(): void {
+    this.server.close();
+    console.log('SSH server stopped accepting new connections');
+  }
+
+  /**
+   * Force stop all sessions and clean up
+   */
   stop(): void {
     this.server.close();
     for (const session of this.sessions.values()) {

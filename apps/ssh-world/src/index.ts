@@ -57,9 +57,33 @@ async function main() {
   gameServer.start();
   sshServer.start();
 
-  // Graceful shutdown
+  // Graceful shutdown with connection draining
+  let isShuttingDown = false;
   const shutdown = async () => {
-    console.log('\nShutting down...');
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+
+    console.log('\nGraceful shutdown initiated...');
+    console.log('Stopping new connections, draining existing sessions...');
+
+    // Stop accepting new connections
+    sshServer.stopAccepting();
+
+    // Wait for existing sessions to finish (max 5 minutes)
+    const drainTimeout = 5 * 60 * 1000;
+    const startTime = Date.now();
+
+    while (sshServer.getSessionCount() > 0) {
+      const elapsed = Date.now() - startTime;
+      if (elapsed >= drainTimeout) {
+        console.log('Drain timeout reached, forcing shutdown...');
+        break;
+      }
+      console.log(`Waiting for ${sshServer.getSessionCount()} sessions to close... (${Math.round((drainTimeout - elapsed) / 1000)}s remaining)`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+
+    console.log('All sessions closed, shutting down...');
     sshServer.stop();
     gameServer.stop();
     process.exit(0);

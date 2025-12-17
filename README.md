@@ -3,7 +3,7 @@
 A terminal-based MMO accessible via SSH. Connect and explore a procedurally generated world with AI-generated avatars.
 
 ```
-ssh -p 2222 abyss.maldoror.dev
+ssh abyss.maldoror.dev
 ```
 
 ## Project Structure
@@ -106,19 +106,53 @@ SERVER="root@your-server-ip"
 ```
 
 This will:
+- Move system SSH to port 22022 (first deploy only)
 - Install Docker on the server (if needed)
 - Sync project files via rsync
 - Build the Docker image
-- Start PostgreSQL and the SSH server
+- Start HAProxy, PostgreSQL, and the SSH server
 - Initialize the database schema
 
 #### Connect
 
 ```bash
-ssh -p 2222 your-server-ip
+ssh your-server-ip
 # or with a domain
-ssh -p 2222 abyss.yourdomain.com
+ssh abyss.yourdomain.com
 ```
+
+#### Admin Access
+
+System SSH is moved to port 22022 to free up port 22 for the game:
+
+```bash
+ssh -p 22022 root@your-server-ip
+```
+
+### Architecture
+
+```
+Internet (port 22) → HAProxy → ssh-world:2222 (game)
+Internet (port 22022) → System SSH (admin)
+```
+
+HAProxy provides:
+- **Zero-downtime deployments**: Connections are queued during restarts
+- **Health checking**: Routes only to healthy backends
+- **Graceful draining**: Existing sessions continue during shutdown
+- **Stats dashboard**: Available at `http://your-server:8404/stats`
+
+#### Zero-Downtime Restarts
+
+The deployment uses connection draining for seamless restarts:
+
+1. New container starts and becomes healthy
+2. HAProxy routes new connections to new container
+3. Old container receives SIGTERM
+4. Old container stops accepting new connections
+5. Existing sessions continue (up to 5 min drain timeout)
+6. Player state saved to database on disconnect
+7. Reconnecting players restore their position automatically
 
 ### Railway Deployment
 
