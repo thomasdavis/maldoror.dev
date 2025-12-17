@@ -89,7 +89,9 @@ export class SSHServer {
         // Extract fingerprint
         const fingerprint = this.extractFingerprint(ctx.key);
         context.fingerprint = fingerprint;
-        context.username = ctx.username;
+        // Don't use ctx.username - that's the computer's username
+        // Username will be set from database for returning users, or onboarding for new users
+        context.username = '';
 
         // Look up user by fingerprint
         const userKey = await db.query.userKeys.findFirst({
@@ -97,8 +99,10 @@ export class SSHServer {
           with: { user: true },
         });
 
-        if (userKey) {
+        if (userKey && userKey.user) {
           context.userId = userKey.userId;
+          // Get the actual username from the database
+          context.username = userKey.user.username;
           // Update last used
           await db
             .update(schema.userKeys)
