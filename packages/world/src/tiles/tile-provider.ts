@@ -1,7 +1,46 @@
-import type { Tile, Sprite, PlayerVisualState, PixelGrid, RGB, WorldDataProvider } from '@maldoror/protocol';
+import type { Tile, Sprite, PlayerVisualState, PixelGrid, RGB, WorldDataProvider, Pixel } from '@maldoror/protocol';
 import { CHUNK_SIZE_TILES } from '@maldoror/protocol';
 import { BASE_TILES, getTileById } from './base-tiles.js';
 import { SeededRandom, ValueNoise } from '../noise/noise.js';
+
+/**
+ * Rotate a pixel grid by 90 degrees clockwise
+ */
+function rotateGrid90(grid: PixelGrid): PixelGrid {
+  const height = grid.length;
+  const width = grid[0]?.length ?? 0;
+  const result: PixelGrid = [];
+
+  for (let x = 0; x < width; x++) {
+    const row: Pixel[] = [];
+    for (let y = height - 1; y >= 0; y--) {
+      row.push(grid[y]?.[x] ?? null);
+    }
+    result.push(row);
+  }
+  return result;
+}
+
+/**
+ * Rotate a pixel grid by specified amount (0, 1, 2, or 3 times 90 degrees)
+ */
+function rotateGrid(grid: PixelGrid, rotations: number): PixelGrid {
+  let result = grid;
+  for (let i = 0; i < (rotations % 4); i++) {
+    result = rotateGrid90(result);
+  }
+  return result;
+}
+
+/**
+ * Simple hash for deterministic rotation based on position
+ */
+function positionHash(x: number, y: number): number {
+  // Mix x and y to get varied rotations
+  let hash = x * 374761393 + y * 668265263;
+  hash = (hash ^ (hash >> 13)) * 1274126177;
+  return hash;
+}
 
 /**
  * Configuration for the tile provider
@@ -72,8 +111,22 @@ export class TileProvider implements WorldDataProvider {
     const tileId = chunk.tiles[localY]?.[localX];
     if (!tileId) return null;
 
-    const tile = getTileById(tileId);
-    return tile ?? BASE_TILES.void ?? null;
+    const baseTile = getTileById(tileId);
+    if (!baseTile) return BASE_TILES.void ?? null;
+
+    // Determine rotation based on world position (0, 1, 2, or 3 = 0°, 90°, 180°, 270°)
+    const rotation = Math.abs(positionHash(tileX, tileY)) % 4;
+
+    // Return rotated tile (skip rotation for animated tiles to preserve animation)
+    if (rotation === 0 || baseTile.animated) {
+      return baseTile;
+    }
+
+    // Create rotated version of the tile
+    return {
+      ...baseTile,
+      pixels: rotateGrid(baseTile.pixels, rotation),
+    };
   }
 
   /**

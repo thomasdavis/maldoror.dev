@@ -33,6 +33,7 @@ export {
   renderPixelGridString,
   renderHalfBlockRow,
   renderHalfBlockGrid,
+  renderBrailleGrid,
   compositeGrids,
   createEmptyGrid,
   createSolidGrid,
@@ -51,4 +52,5 @@ export {
   PixelGameRenderer,
   type PixelGameRendererConfig,
   type GameWorldAdapter,
+  type RenderMode,
 } from './pixel/pixel-game-renderer.js';

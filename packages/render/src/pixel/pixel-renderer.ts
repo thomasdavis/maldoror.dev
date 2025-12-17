@@ -11,7 +11,23 @@ const RESET = `${ESC}[0m`;
  * ▀ = upper half block - foreground color on top, background color on bottom
  */
 const HALF_BLOCK_TOP = '▀';
-// const HALF_BLOCK_BOTTOM = '▄';  // Available if needed for alternative rendering
+
+/**
+ * Braille character base (U+2800) for ultra-high-resolution rendering
+ * Each Braille char is 2×4 dots = 8 subpixels per character
+ * Dot positions and their bit values:
+ *   1 (0x01)  4 (0x08)
+ *   2 (0x02)  5 (0x10)
+ *   3 (0x04)  6 (0x20)
+ *   7 (0x40)  8 (0x80)
+ */
+const BRAILLE_BASE = 0x2800;
+const BRAILLE_DOTS = [
+  [0x01, 0x08],  // Row 0: dots 1, 4
+  [0x02, 0x10],  // Row 1: dots 2, 5
+  [0x04, 0x20],  // Row 2: dots 3, 6
+  [0x40, 0x80],  // Row 3: dots 7, 8
+];
 
 /**
  * Generate ANSI background color code for RGB
@@ -129,6 +145,135 @@ export function renderHalfBlockGrid(grid: PixelGrid): string[] {
     const topRow = grid[y] ?? [];
     const bottomRow = grid[y + 1] ?? [];
     result.push(renderHalfBlockRow(topRow, bottomRow));
+  }
+
+  return result;
+}
+
+/**
+ * Calculate brightness of a pixel (0-255)
+ */
+function pixelBrightness(pixel: Pixel): number {
+  if (!pixel) return 0;
+  // Perceptual luminance formula
+  return Math.round(0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b);
+}
+
+/**
+ * Average multiple pixels into one color
+ */
+function averagePixels(pixels: Pixel[]): RGB {
+  const valid = pixels.filter((p): p is RGB => p !== null);
+  if (valid.length === 0) return { r: 20, g: 20, b: 25 };
+
+  const sum = valid.reduce(
+    (acc, p) => ({ r: acc.r + p.r, g: acc.g + p.g, b: acc.b + p.b }),
+    { r: 0, g: 0, b: 0 }
+  );
+
+  return {
+    r: Math.round(sum.r / valid.length),
+    g: Math.round(sum.g / valid.length),
+    b: Math.round(sum.b / valid.length),
+  };
+}
+
+/**
+ * Render a 2x4 pixel block as a single Braille character
+ * Returns the character and the foreground/background colors to use
+ */
+function renderBrailleChar(
+  block: Pixel[][]  // 4 rows × 2 cols
+): { char: string; fg: RGB; bg: RGB } {
+  // Collect all pixels and their brightness
+  const allPixels: { pixel: Pixel; brightness: number; row: number; col: number }[] = [];
+
+  for (let row = 0; row < 4; row++) {
+    for (let col = 0; col < 2; col++) {
+      const pixel = block[row]?.[col] ?? null;
+      allPixels.push({
+        pixel,
+        brightness: pixelBrightness(pixel),
+        row,
+        col,
+      });
+    }
+  }
+
+  // Find median brightness to threshold
+  const brightnesses = allPixels.map(p => p.brightness).sort((a, b) => a - b);
+  const medianBrightness = brightnesses[4] ?? 128;  // Middle of 8 values
+
+  // Split into foreground (bright) and background (dark) pixels
+  const fgPixels: Pixel[] = [];
+  const bgPixels: Pixel[] = [];
+  let brailleCode = 0;
+
+  for (const p of allPixels) {
+    if (p.brightness >= medianBrightness && p.pixel !== null) {
+      fgPixels.push(p.pixel);
+      // Set the corresponding Braille dot
+      brailleCode |= BRAILLE_DOTS[p.row]![p.col]!;
+    } else {
+      bgPixels.push(p.pixel);
+    }
+  }
+
+  // Calculate average colors for fg and bg
+  const fg = averagePixels(fgPixels);
+  const bg = averagePixels(bgPixels);
+
+  // Generate Braille character
+  const char = String.fromCharCode(BRAILLE_BASE + brailleCode);
+
+  return { char, fg, bg };
+}
+
+/**
+ * Render a pixel grid using Braille characters (ultra-high resolution)
+ * Each character represents 2×4 pixels = 8 subpixels
+ * Returns array of terminal rows, each representing 4 pixel rows
+ */
+export function renderBrailleGrid(grid: PixelGrid): string[] {
+  const result: string[] = [];
+  const height = grid.length;
+  const width = grid[0]?.length ?? 0;
+
+  // Process 4 rows at a time (Braille is 2×4)
+  for (let y = 0; y < height; y += 4) {
+    let line = '';
+    let lastFg: RGB | null = null;
+    let lastBg: RGB | null = null;
+
+    // Process 2 columns at a time
+    for (let x = 0; x < width; x += 2) {
+      // Extract 2×4 block
+      const block: Pixel[][] = [];
+      for (let dy = 0; dy < 4; dy++) {
+        const row: Pixel[] = [];
+        for (let dx = 0; dx < 2; dx++) {
+          row.push(grid[y + dy]?.[x + dx] ?? null);
+        }
+        block.push(row);
+      }
+
+      const { char, fg, bg } = renderBrailleChar(block);
+
+      // Emit color codes if changed
+      if (!lastFg || lastFg.r !== fg.r || lastFg.g !== fg.g || lastFg.b !== fg.b) {
+        line += fgColor(fg);
+        lastFg = fg;
+      }
+      if (!lastBg || lastBg.r !== bg.r || lastBg.g !== bg.g || lastBg.b !== bg.b) {
+        line += bgColor(bg);
+        lastBg = bg;
+      }
+
+      line += char;
+    }
+
+    line += RESET;
+    result.push(line);
   }
 
   return result;

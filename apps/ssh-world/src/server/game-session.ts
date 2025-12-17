@@ -227,7 +227,27 @@ export class GameSession {
       case 'move_right':
         this.move(1, 0, 'right');
         break;
+      case 'zoom_in':
+        this.renderer?.zoomIn();
+        break;
+      case 'zoom_out':
+        this.renderer?.zoomOut();
+        break;
+      case 'cycle_render_mode':
+        this.renderer?.cycleRenderMode();
+        break;
+      case 'quit':
+        this.quit();
+        break;
     }
+  }
+
+  /**
+   * Gracefully quit the session
+   */
+  private async quit(): Promise<void> {
+    await this.destroy();
+    this.stream.end();
   }
 
   private move(dx: number, dy: number, direction: Direction): void {

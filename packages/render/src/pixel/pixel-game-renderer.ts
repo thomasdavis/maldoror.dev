@@ -2,12 +2,20 @@ import type { Duplex } from 'stream';
 import type { WorldDataProvider } from '@maldoror/protocol';
 import { TILE_SIZE } from '@maldoror/protocol';
 import { ViewportRenderer, type ViewportConfig } from './viewport-renderer.js';
-import { downsampleGrid, renderPixelRow, renderHalfBlockGrid } from './pixel-renderer.js';
+import { downsampleGrid, renderPixelRow, renderHalfBlockGrid, renderBrailleGrid } from './pixel-renderer.js';
 
 const ESC = '\x1b';
 
 // Stats bar height in rows
 const STATS_BAR_HEIGHT = 1;
+
+/**
+ * Render mode options
+ * - 'normal': 2 chars per pixel width, 1 row per pixel height
+ * - 'halfblock': 1 char per pixel width, 2 pixels per row (using ▀)
+ * - 'braille': 2 pixels per char width, 4 pixels per row (using Braille dots) - HIGHEST RES
+ */
+export type RenderMode = 'normal' | 'halfblock' | 'braille';
 
 /**
  * Configuration for PixelGameRenderer
@@ -17,8 +25,8 @@ export interface PixelGameRendererConfig {
   cols: number;
   rows: number;
   username?: string;
-  scale?: number;  // Downscale factor: 1 = normal, 2 = 2x2 pixels become 1 terminal pixel
-  highRes?: boolean;  // Use half-block characters for 4x resolution
+  scale?: number;  // Downscale factor: 1 = normal, 1.5 = 50% more world visible
+  renderMode?: RenderMode;  // Rendering mode (default: 'braille' for max resolution)
 }
 
 /**
@@ -47,41 +55,21 @@ export class PixelGameRenderer {
   private playerX: number = 0;
   private playerY: number = 0;
   private scale: number;
-  private highRes: boolean;
+  private renderMode: RenderMode;
 
   constructor(config: PixelGameRendererConfig) {
     this.stream = config.stream;
     this.cols = config.cols;
     this.rows = config.rows;
     this.username = config.username ?? 'Unknown';
-    this.highRes = config.highRes ?? true;  // Default to high-res mode
-    this.scale = config.scale ?? 1.5;  // Default to 1.5x zoom out for better overview
+    this.renderMode = config.renderMode ?? 'halfblock';  // Default to halfblock for good balance
+    this.scale = config.scale ?? 1.2;  // Default to 1.2x zoom out (press +/- to adjust)
 
     // Calculate viewport size in tiles based on terminal size
     // With scale > 1, we render MORE tiles then downsample to fit
-    // In highRes mode:
-    //   - 1 char = 1 pixel width (after downsampling)
-    //   - 1 row = 2 pixel heights (using half-block characters, after downsampling)
     const availableRows = config.rows - STATS_BAR_HEIGHT;
 
-    let widthTiles: number;
-    let heightTiles: number;
-
-    if (this.highRes) {
-      // High-res: 1 char = 1 pixel output, 1 row = 2 pixels output
-      // We render (cols * scale) pixels wide, (availableRows * 2 * scale) pixels tall
-      // Then downsample by scale to fit the screen
-      const pixelWidth = config.cols * this.scale;
-      const pixelHeight = availableRows * 2 * this.scale;
-      widthTiles = Math.floor(pixelWidth / TILE_SIZE);
-      heightTiles = Math.floor(pixelHeight / TILE_SIZE);
-    } else {
-      // Normal: 2 chars = 1 pixel, 1 row = 1 pixel
-      const pixelWidth = (config.cols / 2) * this.scale;
-      const pixelHeight = availableRows * this.scale;
-      widthTiles = Math.floor(pixelWidth / TILE_SIZE);
-      heightTiles = Math.floor(pixelHeight / TILE_SIZE);
-    }
+    const { widthTiles, heightTiles } = this.calculateViewportTiles(config.cols, availableRows);
 
     const viewportConfig: ViewportConfig = {
       widthTiles: Math.max(3, widthTiles),
@@ -89,6 +77,39 @@ export class PixelGameRenderer {
     };
 
     this.viewportRenderer = new ViewportRenderer(viewportConfig);
+  }
+
+  /**
+   * Calculate viewport size in tiles based on render mode
+   */
+  private calculateViewportTiles(cols: number, availableRows: number): { widthTiles: number; heightTiles: number } {
+    let pixelWidth: number;
+    let pixelHeight: number;
+
+    switch (this.renderMode) {
+      case 'braille':
+        // Braille: 1 char = 2 pixels wide, 1 row = 4 pixels tall
+        // This is the highest resolution mode
+        pixelWidth = cols * 2 * this.scale;
+        pixelHeight = availableRows * 4 * this.scale;
+        break;
+      case 'halfblock':
+        // Half-block: 1 char = 1 pixel wide, 1 row = 2 pixels tall
+        pixelWidth = cols * this.scale;
+        pixelHeight = availableRows * 2 * this.scale;
+        break;
+      case 'normal':
+      default:
+        // Normal: 2 chars = 1 pixel wide, 1 row = 1 pixel tall
+        pixelWidth = (cols / 2) * this.scale;
+        pixelHeight = availableRows * this.scale;
+        break;
+    }
+
+    return {
+      widthTiles: Math.floor(pixelWidth / TILE_SIZE),
+      heightTiles: Math.floor(pixelHeight / TILE_SIZE),
+    };
   }
 
   /**
@@ -139,22 +160,7 @@ export class PixelGameRenderer {
     this.rows = rows;
 
     const availableRows = rows - STATS_BAR_HEIGHT;
-    let widthTiles: number;
-    let heightTiles: number;
-
-    if (this.highRes) {
-      // High-res: render more pixels, then downsample
-      const pixelWidth = cols * this.scale;
-      const pixelHeight = availableRows * 2 * this.scale;
-      widthTiles = Math.floor(pixelWidth / TILE_SIZE);
-      heightTiles = Math.floor(pixelHeight / TILE_SIZE);
-    } else {
-      // Normal: render more pixels, then downsample
-      const pixelWidth = (cols / 2) * this.scale;
-      const pixelHeight = availableRows * this.scale;
-      widthTiles = Math.floor(pixelWidth / TILE_SIZE);
-      heightTiles = Math.floor(pixelHeight / TILE_SIZE);
-    }
+    const { widthTiles, heightTiles } = this.calculateViewportTiles(cols, availableRows);
 
     this.viewportRenderer.resize(
       Math.max(3, widthTiles),
@@ -196,14 +202,22 @@ export class PixelGameRenderer {
     // Downsample if scale > 1
     const scaledBuffer = this.scale > 1 ? downsampleGrid(fullBuffer, this.scale) : fullBuffer;
 
-    // Convert to ANSI lines
+    // Convert to ANSI lines based on render mode
     let viewportLines: string[];
-    if (this.highRes) {
-      // High-res mode: use half-block characters (2 pixels per row, 1 char per pixel)
-      viewportLines = renderHalfBlockGrid(scaledBuffer);
-    } else {
-      // Normal mode: 1 pixel per row, 2 chars per pixel
-      viewportLines = scaledBuffer.map(row => renderPixelRow(row));
+    switch (this.renderMode) {
+      case 'braille':
+        // Braille mode: 8 subpixels per character (2×4 dots) - HIGHEST RES
+        viewportLines = renderBrailleGrid(scaledBuffer);
+        break;
+      case 'halfblock':
+        // Half-block mode: 2 pixels per row, 1 char per pixel
+        viewportLines = renderHalfBlockGrid(scaledBuffer);
+        break;
+      case 'normal':
+      default:
+        // Normal mode: 1 pixel per row, 2 chars per pixel
+        viewportLines = scaledBuffer.map(row => renderPixelRow(row));
+        break;
     }
 
     // Pad viewport lines to fill screen width
@@ -231,17 +245,30 @@ export class PixelGameRenderer {
     // Calculate the visible width of the viewport in terminal chars
     let viewportCharWidth: number;
 
-    if (this.highRes) {
-      // High-res: render (cols * scale) pixels, downsample to cols chars
-      // After downsampling, we get floor(widthTiles * TILE_SIZE / scale) chars
-      const pixelWidth = this.cols * this.scale;
-      const widthTiles = Math.floor(pixelWidth / TILE_SIZE);
-      viewportCharWidth = Math.floor(widthTiles * TILE_SIZE / this.scale);
-    } else {
-      // Normal: 2 chars per pixel output
-      const pixelWidth = (this.cols / 2) * this.scale;
-      const widthTiles = Math.floor(pixelWidth / TILE_SIZE);
-      viewportCharWidth = Math.floor(widthTiles * TILE_SIZE / this.scale) * 2;
+    switch (this.renderMode) {
+      case 'braille': {
+        // Braille: 1 char = 2 pixels, so output width = pixels / 2
+        const pixelWidth = this.cols * 2 * this.scale;
+        const widthTiles = Math.floor(pixelWidth / TILE_SIZE);
+        const outputPixelWidth = Math.floor(widthTiles * TILE_SIZE / this.scale);
+        viewportCharWidth = Math.floor(outputPixelWidth / 2);
+        break;
+      }
+      case 'halfblock': {
+        // Half-block: 1 char = 1 pixel
+        const pixelWidth = this.cols * this.scale;
+        const widthTiles = Math.floor(pixelWidth / TILE_SIZE);
+        viewportCharWidth = Math.floor(widthTiles * TILE_SIZE / this.scale);
+        break;
+      }
+      case 'normal':
+      default: {
+        // Normal: 2 chars = 1 pixel
+        const pixelWidth = (this.cols / 2) * this.scale;
+        const widthTiles = Math.floor(pixelWidth / TILE_SIZE);
+        viewportCharWidth = Math.floor(widthTiles * TILE_SIZE / this.scale) * 2;
+        break;
+      }
     }
 
     const paddingNeeded = this.cols - viewportCharWidth;
@@ -260,26 +287,31 @@ export class PixelGameRenderer {
   }
 
   /**
-   * Render the stats bar showing username and coordinates
+   * Render the stats bar showing username, coordinates, zoom, and render mode
    */
   private renderStatsBar(): string {
     const coordStr = `(${this.playerX}, ${this.playerY})`;
+    const zoomStr = `${Math.round(100 / this.scale)}%`;
+    const modeStr = this.renderMode.charAt(0).toUpperCase();  // B, H, or N
+
     const leftText = ` ${this.username}`;
+    const centerText = `${modeStr}:${zoomStr}`;
     const rightText = `${coordStr} `;
 
-    // Calculate padding
+    // Calculate padding for center alignment
     const totalWidth = this.cols;
-    const contentWidth = leftText.length + rightText.length;
-    const padding = Math.max(0, totalWidth - contentWidth);
+    const leftPadding = Math.max(0, Math.floor((totalWidth - centerText.length) / 2) - leftText.length);
+    const rightPadding = Math.max(0, totalWidth - leftText.length - leftPadding - centerText.length - rightText.length);
 
     // Create stats bar with dark background
     // Using ANSI: white text on dark gray background
     const bg = `${ESC}[48;2;30;30;40m`;  // Dark blue-gray background
     const fgName = `${ESC}[38;2;100;200;255m`;  // Cyan for username
+    const fgMode = `${ESC}[38;2;255;200;100m`;  // Gold for mode/zoom
     const fgCoord = `${ESC}[38;2;180;180;180m`;  // Gray for coordinates
     const reset = `${ESC}[0m`;
 
-    return `${bg}${fgName}${leftText}${' '.repeat(padding)}${fgCoord}${rightText}${reset}`;
+    return `${bg}${fgName}${leftText}${' '.repeat(leftPadding)}${fgMode}${centerText}${' '.repeat(rightPadding)}${fgCoord}${rightText}${reset}`;
   }
 
   /**
@@ -287,26 +319,32 @@ export class PixelGameRenderer {
    */
   private outputFrame(lines: string[]): void {
     let output = '';
-
-    // Move to home position
-    output += `${ESC}[H`;
+    const bgColor = `${ESC}[48;2;20;20;25m`;
 
     if (this.forceRedraw || this.previousOutput.length !== lines.length) {
-      // Full redraw
-      output += lines.join(`${ESC}[0m\n`) + `${ESC}[0m`;
+      // Full redraw - write every line from the top
+      output += `${ESC}[H`;  // Move to home
+      for (let y = 0; y < lines.length; y++) {
+        output += `${ESC}[${y + 1};1H`;  // Move to line y+1
+        output += lines[y] + `${ESC}[0m${bgColor}`;
+      }
+      // Clear any remaining lines below
+      output += `${ESC}[J`;  // Clear from cursor to end of screen
       this.forceRedraw = false;
     } else {
       // Incremental update - only redraw changed lines
       for (let y = 0; y < lines.length; y++) {
         if (lines[y] !== this.previousOutput[y]) {
-          output += `${ESC}[${y + 1};1H`;  // Move to line y
+          output += `${ESC}[${y + 1};1H`;  // Move to line y+1
           output += lines[y] + `${ESC}[0m`;
         }
       }
     }
 
-    this.stream.write(output);
-    this.previousOutput = lines;
+    if (output) {
+      this.stream.write(output);
+    }
+    this.previousOutput = [...lines];
   }
 
   /**
@@ -340,5 +378,83 @@ export class PixelGameRenderer {
       widthTiles: Math.floor(dims.width / (TILE_SIZE * 2)),
       heightTiles: dims.height / TILE_SIZE,
     };
+  }
+
+  /**
+   * Get current scale factor
+   */
+  getScale(): number {
+    return this.scale;
+  }
+
+  /**
+   * Set scale factor and recalculate viewport
+   */
+  setScale(scale: number): void {
+    this.scale = Math.max(0.5, Math.min(3, scale));  // Clamp between 0.5x and 3x
+
+    const availableRows = this.rows - STATS_BAR_HEIGHT;
+    const { widthTiles, heightTiles } = this.calculateViewportTiles(this.cols, availableRows);
+
+    this.viewportRenderer.resize(
+      Math.max(3, widthTiles),
+      Math.max(3, heightTiles)
+    );
+
+    // Update camera for new viewport dimensions
+    this.viewportRenderer.setCamera(this.playerX, this.playerY);
+
+    this.invalidate();
+  }
+
+  /**
+   * Get current render mode
+   */
+  getRenderMode(): RenderMode {
+    return this.renderMode;
+  }
+
+  /**
+   * Set render mode and recalculate viewport
+   */
+  setRenderMode(mode: RenderMode): void {
+    this.renderMode = mode;
+
+    const availableRows = this.rows - STATS_BAR_HEIGHT;
+    const { widthTiles, heightTiles } = this.calculateViewportTiles(this.cols, availableRows);
+
+    this.viewportRenderer.resize(
+      Math.max(3, widthTiles),
+      Math.max(3, heightTiles)
+    );
+
+    // Update camera for new viewport dimensions
+    this.viewportRenderer.setCamera(this.playerX, this.playerY);
+
+    this.invalidate();
+  }
+
+  /**
+   * Cycle through render modes
+   */
+  cycleRenderMode(): void {
+    const modes: RenderMode[] = ['braille', 'halfblock', 'normal'];
+    const currentIndex = modes.indexOf(this.renderMode);
+    const nextIndex = (currentIndex + 1) % modes.length;
+    this.setRenderMode(modes[nextIndex]!);
+  }
+
+  /**
+   * Zoom in (decrease scale = more zoomed in)
+   */
+  zoomIn(): void {
+    this.setScale(this.scale - 0.2);
+  }
+
+  /**
+   * Zoom out (increase scale = more zoomed out)
+   */
+  zoomOut(): void {
+    this.setScale(this.scale + 0.2);
   }
 }

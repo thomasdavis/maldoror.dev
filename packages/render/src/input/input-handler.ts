@@ -56,6 +56,17 @@ export class InputHandler {
       { key: 'T', action: 'start_chat' },
       { key: 'Escape', action: 'open_menu' },
       { key: 'r', action: 'regenerate_avatar' },
+      // Zoom controls
+      { key: '+', action: 'zoom_in' },
+      { key: '=', action: 'zoom_in' },
+      { key: '-', action: 'zoom_out' },
+      { key: '_', action: 'zoom_out' },
+      // Render mode toggle
+      { key: 'v', action: 'cycle_render_mode' },
+      { key: 'V', action: 'cycle_render_mode' },
+      // Quit
+      { key: 'q', action: 'quit' },
+      { key: 'Q', action: 'quit' },
     ]);
 
     // Chat mode bindings
