@@ -32,6 +32,7 @@
     "@maldoror/tsconfig": "workspace:*",
     "@types/pg": "^8.11.0",
     "drizzle-kit": "catalog:",
+    "tsup": "^8.3.5",
     "typescript": "catalog:"
   }
 }

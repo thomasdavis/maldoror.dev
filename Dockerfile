@@ -26,6 +26,15 @@ COPY . .
 # Build all packages
 RUN pnpm build
 
+# Re-bundle db package with tsup for proper ESM resolution
+RUN cd packages/db && npx tsup src/index.ts src/schema/index.ts \
+    --format esm \
+    --dts \
+    --clean \
+    --external drizzle-orm \
+    --external pg \
+    --external @maldoror/protocol
+
 # Production stage
 FROM node:20-alpine AS runner
 
