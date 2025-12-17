@@ -33,3 +33,13 @@ export {
   createPlaceholderSprite,
   type TileProviderConfig,
 } from './tiles/tile-provider.js';
+
+// Procedural tile generation
+export {
+  generateProceduralTile,
+  generateTerrainPixel,
+  generateAllResolutions,
+  generateWaterAnimationFrames,
+  type TerrainType,
+  type NeighborInfo,
+} from './tiles/procedural-tiles.js';

@@ -2,6 +2,13 @@ import type { Tile, Sprite, PlayerVisualState, PixelGrid, RGB, WorldDataProvider
 import { CHUNK_SIZE_TILES, BASE_SIZE, RESOLUTIONS } from '@maldoror/protocol';
 import { BASE_TILES, getTileById } from './base-tiles.js';
 import { SeededRandom, ValueNoise } from '../noise/noise.js';
+import {
+  generateProceduralTile,
+  generateAllResolutions,
+  generateWaterAnimationFrames,
+  type TerrainType,
+  type NeighborInfo,
+} from './procedural-tiles.js';
 
 /**
  * Rotate a pixel grid by 90 degrees clockwise
@@ -59,10 +66,19 @@ interface ChunkData {
 }
 
 /**
+ * Cached procedural tile data
+ */
+interface ProceduralTileCache {
+  tile: Tile;
+  accessedAt: number;
+}
+
+/**
  * TileProvider - Provides tile and player data to the renderer
  *
  * Handles:
  * - Tile lookups by world coordinates
+ * - Procedural tile generation with neighbor blending
  * - Chunk generation and caching
  * - Player sprite management
  */
@@ -70,15 +86,29 @@ export class TileProvider implements WorldDataProvider {
   private worldSeed: bigint;
   private noise: ValueNoise;
   private chunkCache: Map<string, ChunkData> = new Map();
+  private tileCache: Map<string, ProceduralTileCache> = new Map();
   private maxChunks: number;
+  private maxTiles: number;
   private players: Map<string, PlayerVisualState> = new Map();
   private sprites: Map<string, Sprite> = new Map();
   private localPlayerId: string = '';
+  private useProceduralTiles: boolean = true;
 
   constructor(config: TileProviderConfig) {
     this.worldSeed = config.worldSeed;
     this.noise = new ValueNoise(config.worldSeed);
     this.maxChunks = config.chunkCacheSize ?? 64;
+    this.maxTiles = 256; // Cache up to 256 procedural tiles
+  }
+
+  /**
+   * Enable or disable procedural tile generation
+   */
+  setProceduralTiles(enabled: boolean): void {
+    this.useProceduralTiles = enabled;
+    if (!enabled) {
+      this.tileCache.clear();
+    }
   }
 
   /**
@@ -96,9 +126,9 @@ export class TileProvider implements WorldDataProvider {
   }
 
   /**
-   * Get tile at world coordinates
+   * Get tile ID at world coordinates (for neighbor lookups)
    */
-  getTile(tileX: number, tileY: number): Tile | null {
+  private getTileId(tileX: number, tileY: number): string | null {
     const chunkX = Math.floor(tileX / CHUNK_SIZE_TILES);
     const chunkY = Math.floor(tileY / CHUNK_SIZE_TILES);
 
@@ -108,25 +138,131 @@ export class TileProvider implements WorldDataProvider {
     const localX = ((tileX % CHUNK_SIZE_TILES) + CHUNK_SIZE_TILES) % CHUNK_SIZE_TILES;
     const localY = ((tileY % CHUNK_SIZE_TILES) + CHUNK_SIZE_TILES) % CHUNK_SIZE_TILES;
 
-    const tileId = chunk.tiles[localY]?.[localX];
+    return chunk.tiles[localY]?.[localX] ?? null;
+  }
+
+  /**
+   * Get neighbor terrain types for a tile
+   */
+  private getNeighborInfo(tileX: number, tileY: number): NeighborInfo {
+    return {
+      north: this.getTileId(tileX, tileY - 1) as TerrainType | undefined,
+      south: this.getTileId(tileX, tileY + 1) as TerrainType | undefined,
+      east: this.getTileId(tileX + 1, tileY) as TerrainType | undefined,
+      west: this.getTileId(tileX - 1, tileY) as TerrainType | undefined,
+      northEast: this.getTileId(tileX + 1, tileY - 1) as TerrainType | undefined,
+      northWest: this.getTileId(tileX - 1, tileY - 1) as TerrainType | undefined,
+      southEast: this.getTileId(tileX + 1, tileY + 1) as TerrainType | undefined,
+      southWest: this.getTileId(tileX - 1, tileY + 1) as TerrainType | undefined,
+    };
+  }
+
+  /**
+   * Get tile at world coordinates
+   */
+  getTile(tileX: number, tileY: number): Tile | null {
+    const tileId = this.getTileId(tileX, tileY);
     if (!tileId) return null;
 
+    // Use procedural generation if enabled
+    if (this.useProceduralTiles) {
+      return this.getProceduralTile(tileX, tileY, tileId as TerrainType);
+    }
+
+    // Fall back to base tiles
     const baseTile = getTileById(tileId);
     if (!baseTile) return BASE_TILES.void ?? null;
 
-    // Determine rotation based on world position (0, 1, 2, or 3 = 0°, 90°, 180°, 270°)
+    // Determine rotation based on world position
     const rotation = Math.abs(positionHash(tileX, tileY)) % 4;
 
-    // Return rotated tile (skip rotation for animated tiles to preserve animation)
     if (rotation === 0 || baseTile.animated) {
       return baseTile;
     }
 
-    // Create rotated version of the tile
     return {
       ...baseTile,
       pixels: rotateGrid(baseTile.pixels, rotation),
     };
+  }
+
+  /**
+   * Get or generate a procedural tile with neighbor blending
+   */
+  private getProceduralTile(tileX: number, tileY: number, terrainType: TerrainType): Tile {
+    const cacheKey = `${tileX},${tileY}`;
+
+    // Check cache
+    const cached = this.tileCache.get(cacheKey);
+    if (cached) {
+      cached.accessedAt = Date.now();
+      return cached.tile;
+    }
+
+    // Get neighbor info for blending
+    const neighbors = this.getNeighborInfo(tileX, tileY);
+
+    // Use world seed + position for deterministic generation
+    const tileSeed = Number(this.worldSeed & 0xffffffffn) + tileX * 374761393 + tileY * 668265263;
+
+    // Generate the tile
+    const isWater = terrainType === 'water';
+    const pixels = generateProceduralTile(terrainType, tileX, tileY, tileSeed, neighbors, 0);
+    const resolutions = generateAllResolutions(pixels);
+
+    let tile: Tile;
+
+    if (isWater) {
+      // Generate animation frames for water
+      const animationFrames = generateWaterAnimationFrames(tileX, tileY, tileSeed, neighbors, 4);
+      const animationResolutions: Record<string, PixelGrid[]> = {};
+
+      for (const size of RESOLUTIONS) {
+        animationResolutions[String(size)] = animationFrames.map(frame =>
+          downscaleGrid(frame, size)
+        );
+      }
+
+      tile = {
+        id: terrainType,
+        name: terrainType.charAt(0).toUpperCase() + terrainType.slice(1),
+        pixels,
+        walkable: false,
+        animated: true,
+        animationFrames,
+        resolutions,
+        animationResolutions,
+      };
+    } else {
+      tile = {
+        id: terrainType,
+        name: terrainType.charAt(0).toUpperCase() + terrainType.slice(1),
+        pixels,
+        walkable: terrainType !== 'void',
+        resolutions,
+      };
+    }
+
+    // Cache the tile
+    this.tileCache.set(cacheKey, { tile, accessedAt: Date.now() });
+    this.evictOldTiles();
+
+    return tile;
+  }
+
+  /**
+   * Evict old tiles from cache
+   */
+  private evictOldTiles(): void {
+    if (this.tileCache.size <= this.maxTiles) return;
+
+    const entries = Array.from(this.tileCache.entries())
+      .sort((a, b) => a[1].accessedAt - b[1].accessedAt);
+
+    const toRemove = entries.slice(0, entries.length - this.maxTiles);
+    for (const [key] of toRemove) {
+      this.tileCache.delete(key);
+    }
   }
 
   /**
@@ -264,6 +400,7 @@ export class TileProvider implements WorldDataProvider {
    */
   clearCache(): void {
     this.chunkCache.clear();
+    this.tileCache.clear();
   }
 }
 
