@@ -1,8 +1,8 @@
 import type { InferSelectModel, InferInsertModel } from 'drizzle-orm';
-import type { users, userKeys } from './users';
-import type { avatars, avatarJobs } from './avatars';
-import type { world, chunkDeltas } from './world';
-import type { playerState, sessions, gameEvents } from './sessions';
+import type { users, userKeys } from './users.js';
+import type { avatars, avatarJobs } from './avatars.js';
+import type { world, chunkDeltas } from './world.js';
+import type { playerState, sessions, gameEvents } from './sessions.js';
 
 // User types
 export type User = InferSelectModel<typeof users>;

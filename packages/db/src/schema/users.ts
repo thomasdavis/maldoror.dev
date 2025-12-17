@@ -61,5 +61,5 @@ export const userKeysRelations = relations(userKeys, ({ one }) => ({
 }));
 
 // Import for relations (will be defined in other files)
-import { avatars } from './avatars';
-import { playerState, sessions } from './sessions';
+import { avatars } from './avatars.js';
+import { playerState, sessions } from './sessions.js';
