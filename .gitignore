@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Testing
+coverage/
+.nyc_output/
+
+# Turbo
+.turbo/
+
+# SSH keys (generated)
+apps/ssh-world/keys/*.key
+apps/ssh-world/keys/*.pub
+!apps/ssh-world/keys/.gitkeep
+
+# Database
+*.db
+*.sqlite
+
+# Drizzle
+drizzle/meta/
+
+# Misc
+*.tgz
+.cache/

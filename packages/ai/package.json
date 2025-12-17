@@ -1,0 +1,30 @@
+{
+  "name": "@maldoror/ai",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@maldoror/protocol": "workspace:*",
+    "ai": "^4.0.0",
+    "@ai-sdk/anthropic": "^1.0.0",
+    "@ai-sdk/openai": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@maldoror/tsconfig": "workspace:*",
+    "@types/node": "^22.10.0",
+    "typescript": "catalog:"
+  }
+}

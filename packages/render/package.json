@@ -1,0 +1,26 @@
+{
+  "name": "@maldoror/render",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@maldoror/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@maldoror/tsconfig": "workspace:*",
+    "@types/node": "^22.10.0",
+    "typescript": "catalog:"
+  }
+}
