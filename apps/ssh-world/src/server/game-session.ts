@@ -451,6 +451,24 @@ export class GameSession {
       case 'toggle_players':
         this.togglePlayerList();
         break;
+      case 'toggle_camera_mode':
+        this.toggleCameraMode();
+        break;
+      case 'snap_to_player':
+        this.snapCameraToPlayer();
+        break;
+      case 'pan_camera_up':
+        this.panCamera(0, -1);
+        break;
+      case 'pan_camera_down':
+        this.panCamera(0, 1);
+        break;
+      case 'pan_camera_left':
+        this.panCamera(-1, 0);
+        break;
+      case 'pan_camera_right':
+        this.panCamera(1, 0);
+        break;
       case 'quit':
         this.quit();
         break;
@@ -467,6 +485,41 @@ export class GameSession {
       this.cachedAllPlayers = await this.workerManager.getAllPlayers();
     }
     this.renderer?.invalidate();
+  }
+
+  /**
+   * Toggle between follow and free camera modes
+   */
+  private toggleCameraMode(): void {
+    if (!this.renderer) return;
+    this.renderer.toggleCameraMode();
+    // When switching to free mode, camera stays at current position
+    // When switching back to follow mode, it will snap to player on next tick
+    this.renderer.invalidate();
+  }
+
+  /**
+   * Snap camera back to player position
+   */
+  private snapCameraToPlayer(): void {
+    if (!this.renderer) return;
+    this.renderer.snapCameraToPlayer();
+    // Also switch back to follow mode
+    this.renderer.setCameraMode('follow');
+    this.renderer.invalidate();
+  }
+
+  /**
+   * Pan camera by tile offset (for free camera mode)
+   */
+  private panCamera(dx: number, dy: number): void {
+    if (!this.renderer) return;
+    // Auto-switch to free mode when panning
+    if (this.renderer.getCameraMode() === 'follow') {
+      this.renderer.setCameraMode('free');
+    }
+    this.renderer.panCameraByTiles(dx, dy);
+    this.renderer.invalidate();
   }
 
   /**

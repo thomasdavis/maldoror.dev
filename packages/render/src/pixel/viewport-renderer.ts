@@ -14,8 +14,10 @@ import {
  * Viewport configuration
  */
 export interface ViewportConfig {
-  widthTiles: number;   // Viewport width in tiles
-  heightTiles: number;  // Viewport height in tiles
+  widthTiles: number;   // Viewport width in tiles (used for tile count calculation)
+  heightTiles: number;  // Viewport height in tiles (used for tile count calculation)
+  pixelWidth?: number;  // Actual pixel width of viewport (fills screen, allows partial tiles)
+  pixelHeight?: number; // Actual pixel height of viewport (fills screen, allows partial tiles)
   tileRenderSize?: number;  // Tile screen render size in pixels (default: TILE_SIZE)
   dataResolution?: number;  // Resolution to fetch from pre-computed data (default: auto-select)
 }
@@ -43,12 +45,23 @@ export interface ViewportRenderResult {
 export type { WorldDataProvider } from '@maldoror/protocol';
 
 /**
+ * Camera mode
+ */
+export type CameraMode = 'follow' | 'free';
+
+/**
  * Render the game viewport to ANSI strings
  */
 export class ViewportRenderer {
   private config: ViewportConfig;
-  private cameraX: number = 0;  // Camera position in tiles
-  private cameraY: number = 0;
+  // Camera center position in WORLD PIXELS (sub-tile precision)
+  private cameraCenterX: number = 0;
+  private cameraCenterY: number = 0;
+  // Target position for smooth camera (when following player)
+  private targetCenterX: number = 0;
+  private targetCenterY: number = 0;
+  // Camera mode
+  private cameraMode: CameraMode = 'follow';
   private pendingOverlays: TextOverlay[] = [];  // Collected during render
   private tileRenderSize: number;  // Tile screen render size in pixels
   private dataResolution: number;  // Resolution to fetch from pre-computed data
@@ -70,8 +83,17 @@ export class ViewportRenderer {
    * Set tile render size and auto-select data resolution
    */
   setTileRenderSize(size: number): void {
+    const oldSize = this.tileRenderSize;
     this.tileRenderSize = size;
     this.dataResolution = this.getBestResolution(size);
+    // Scale camera position to maintain world position when tile size changes
+    if (oldSize > 0) {
+      const scale = size / oldSize;
+      this.cameraCenterX *= scale;
+      this.cameraCenterY *= scale;
+      this.targetCenterX *= scale;
+      this.targetCenterY *= scale;
+    }
   }
 
   /**
@@ -82,11 +104,95 @@ export class ViewportRenderer {
   }
 
   /**
-   * Set camera position (centered on player)
+   * Get camera mode
+   */
+  getCameraMode(): CameraMode {
+    return this.cameraMode;
+  }
+
+  /**
+   * Set camera mode
+   */
+  setCameraMode(mode: CameraMode): void {
+    this.cameraMode = mode;
+  }
+
+  /**
+   * Toggle between follow and free camera modes
+   */
+  toggleCameraMode(): CameraMode {
+    this.cameraMode = this.cameraMode === 'follow' ? 'free' : 'follow';
+    return this.cameraMode;
+  }
+
+  /**
+   * Set camera to center on a tile position (used when following player)
+   * Camera tracks the CENTER of the given tile in world pixels
    */
   setCamera(tileX: number, tileY: number): void {
-    this.cameraX = tileX - Math.floor(this.config.widthTiles / 2);
-    this.cameraY = tileY - Math.floor(this.config.heightTiles / 2);
+    // Target is the CENTER of the player's tile (in world pixels)
+    this.targetCenterX = (tileX + 0.5) * this.tileRenderSize;
+    this.targetCenterY = (tileY + 0.5) * this.tileRenderSize;
+
+    // In follow mode, snap to target (or could lerp for smooth follow)
+    if (this.cameraMode === 'follow') {
+      this.cameraCenterX = this.targetCenterX;
+      this.cameraCenterY = this.targetCenterY;
+    }
+  }
+
+  /**
+   * Pan the camera by pixel offset (for free camera mode)
+   */
+  panCamera(deltaX: number, deltaY: number): void {
+    this.cameraCenterX += deltaX;
+    this.cameraCenterY += deltaY;
+  }
+
+  /**
+   * Pan the camera by tile offset
+   */
+  panCameraByTiles(deltaTilesX: number, deltaTilesY: number): void {
+    this.cameraCenterX += deltaTilesX * this.tileRenderSize;
+    this.cameraCenterY += deltaTilesY * this.tileRenderSize;
+  }
+
+  /**
+   * Snap camera back to follow target (player position)
+   */
+  snapToTarget(): void {
+    this.cameraCenterX = this.targetCenterX;
+    this.cameraCenterY = this.targetCenterY;
+  }
+
+  /**
+   * Get camera center in world pixels
+   */
+  getCameraCenter(): { x: number; y: number } {
+    return { x: this.cameraCenterX, y: this.cameraCenterY };
+  }
+
+  /**
+   * Get camera center in tile coordinates
+   */
+  getCameraTilePosition(): { x: number; y: number } {
+    return {
+      x: this.cameraCenterX / this.tileRenderSize - 0.5,
+      y: this.cameraCenterY / this.tileRenderSize - 0.5,
+    };
+  }
+
+  /**
+   * Get the top-left world pixel coordinate of the viewport
+   */
+  private getViewportOrigin(): { x: number; y: number } {
+    // Use explicit pixel dimensions if set, otherwise calculate from tiles
+    const viewportPixelWidth = this.config.pixelWidth ?? (this.config.widthTiles * this.tileRenderSize);
+    const viewportPixelHeight = this.config.pixelHeight ?? (this.config.heightTiles * this.tileRenderSize);
+    return {
+      x: this.cameraCenterX - viewportPixelWidth / 2,
+      y: this.cameraCenterY - viewportPixelHeight / 2,
+    };
   }
 
   /**
@@ -97,11 +203,6 @@ export class ViewportRenderer {
     return this.bufferToAnsi(result.buffer);
   }
 
-  // Sprite overflow padding - sprites are now scaled to tile size, so no overflow needed
-  // Keep small padding for safety
-  private spriteOverflowX = 0;
-  private spriteOverflowY = 0;
-
   /**
    * Render the viewport to a raw pixel buffer with text overlays
    */
@@ -109,18 +210,22 @@ export class ViewportRenderer {
     // Reset overlays for this frame
     this.pendingOverlays = [];
 
-    // Calculate pixel dimensions using current tile render size
-    const pixelWidth = this.config.widthTiles * this.tileRenderSize;
-    const pixelHeight = this.config.heightTiles * this.tileRenderSize;
+    // Use explicit pixel dimensions if set, otherwise calculate from tiles
+    // This allows filling the entire screen with partial tiles at edges
+    const pixelWidth = this.config.pixelWidth ?? (this.config.widthTiles * this.tileRenderSize);
+    const pixelHeight = this.config.pixelHeight ?? (this.config.heightTiles * this.tileRenderSize);
 
     // Create the pixel buffer
     const buffer = createEmptyGrid(pixelWidth, pixelHeight);
 
-    // 1. Render tiles (offset by sprite overflow padding)
-    this.renderTiles(buffer, world, tick);
+    // Get viewport origin in world pixels
+    const origin = this.getViewportOrigin();
+
+    // 1. Render tiles with sub-pixel offset
+    this.renderTiles(buffer, world, tick, origin);
 
     // 2. Render players (sorted by Y for proper overlap)
-    this.renderPlayers(buffer, world, tick);
+    this.renderPlayers(buffer, world, tick, origin);
 
     return {
       buffer,
@@ -129,16 +234,20 @@ export class ViewportRenderer {
   }
 
   /**
-   * Render tiles to buffer
+   * Render tiles to buffer with sub-pixel camera positioning
    */
-  private renderTiles(buffer: PixelGrid, world: WorldDataProvider, tick: number): void {
+  private renderTiles(buffer: PixelGrid, world: WorldDataProvider, tick: number, origin: { x: number; y: number }): void {
     // Use the pre-selected data resolution
     const resKey = String(this.dataResolution);
 
-    for (let ty = 0; ty < this.config.heightTiles; ty++) {
-      for (let tx = 0; tx < this.config.widthTiles; tx++) {
-        const worldTileX = this.cameraX + tx;
-        const worldTileY = this.cameraY + ty;
+    // Calculate which tiles are visible (with +1 padding for partial tiles at edges)
+    const startTileX = Math.floor(origin.x / this.tileRenderSize);
+    const startTileY = Math.floor(origin.y / this.tileRenderSize);
+    const endTileX = Math.ceil((origin.x + buffer[0]!.length) / this.tileRenderSize);
+    const endTileY = Math.ceil((origin.y + buffer.length) / this.tileRenderSize);
+
+    for (let worldTileY = startTileY; worldTileY <= endTileY; worldTileY++) {
+      for (let worldTileX = startTileX; worldTileX <= endTileX; worldTileX++) {
         const tile = world.getTile(worldTileX, worldTileY);
 
         if (tile) {
@@ -160,18 +269,25 @@ export class ViewportRenderer {
           // Scale to exact tile render size if needed
           const scaledPixels = this.scaleFrame(tilePixels, this.tileRenderSize, this.tileRenderSize);
 
-          // Copy tile pixels to buffer
-          const bufferX = tx * this.tileRenderSize;
-          const bufferY = ty * this.tileRenderSize;
+          // Calculate screen position (world pixel position minus viewport origin)
+          const screenX = Math.round(worldTileX * this.tileRenderSize - origin.x);
+          const screenY = Math.round(worldTileY * this.tileRenderSize - origin.y);
 
-          for (let py = 0; py < this.tileRenderSize && py < scaledPixels.length; py++) {
+          // Copy tile pixels to buffer (handling partial tiles at edges)
+          for (let py = 0; py < scaledPixels.length; py++) {
             const tileRow = scaledPixels[py];
             if (!tileRow) continue;
 
-            for (let px = 0; px < this.tileRenderSize && px < tileRow.length; px++) {
+            const bufferY = screenY + py;
+            if (bufferY < 0 || bufferY >= buffer.length) continue;
+
+            for (let px = 0; px < tileRow.length; px++) {
+              const bufferX = screenX + px;
+              if (bufferX < 0 || bufferX >= buffer[bufferY]!.length) continue;
+
               const pixel = tileRow[px];
-              if (pixel && buffer[bufferY + py]) {
-                buffer[bufferY + py]![bufferX + px] = pixel;
+              if (pixel) {
+                buffer[bufferY]![bufferX] = pixel;
               }
             }
           }
@@ -218,9 +334,9 @@ export class ViewportRenderer {
   }
 
   /**
-   * Render players to buffer
+   * Render players to buffer with sub-pixel camera positioning
    */
-  private renderPlayers(buffer: PixelGrid, world: WorldDataProvider, _tick: number): void {
+  private renderPlayers(buffer: PixelGrid, world: WorldDataProvider, _tick: number, origin: { x: number; y: number }): void {
     const players = world.getPlayers();
     const localId = world.getLocalPlayerId();
 
@@ -231,7 +347,7 @@ export class ViewportRenderer {
       const sprite = world.getPlayerSprite(player.userId);
       if (!sprite) {
         // Render placeholder if no sprite
-        this.renderPlaceholderPlayer(buffer, player);
+        this.renderPlaceholderPlayer(buffer, player, origin);
         continue;
       }
 
@@ -250,28 +366,25 @@ export class ViewportRenderer {
       // Scale to exact tile render size if needed
       const frame = this.scaleFrame(rawFrame, this.tileRenderSize, this.tileRenderSize);
 
-      // Calculate screen position in pixels
-      // Player position is in tiles, sprite is now tile-sized
-      const screenTileX = player.x - this.cameraX;
-      const screenTileY = player.y - this.cameraY;
-
-      // Position sprite at the tile location
-      const bufferX = screenTileX * this.tileRenderSize;
-      const bufferY = screenTileY * this.tileRenderSize;
+      // Calculate screen position (world pixel position minus viewport origin)
+      const worldPixelX = player.x * this.tileRenderSize;
+      const worldPixelY = player.y * this.tileRenderSize;
+      const screenX = Math.round(worldPixelX - origin.x);
+      const screenY = Math.round(worldPixelY - origin.y);
 
       // Composite sprite onto buffer
       for (let py = 0; py < frame.length; py++) {
         const spriteRow = frame[py];
         if (!spriteRow) continue;
 
-        const targetY = bufferY + py;
+        const targetY = screenY + py;
         if (targetY < 0 || targetY >= buffer.length) continue;
 
         for (let px = 0; px < spriteRow.length; px++) {
           const pixel = spriteRow[px];
           if (pixel === null || pixel === undefined) continue;  // Transparent or undefined
 
-          const targetX = bufferX + px;
+          const targetX = screenX + px;
           if (targetX < 0 || targetX >= (buffer[targetY]?.length ?? 0)) continue;
 
           buffer[targetY]![targetX] = pixel;
@@ -281,8 +394,8 @@ export class ViewportRenderer {
       // Add username overlay above sprite for other players
       if (player.userId !== localId) {
         // Center the username above the sprite
-        const usernamePixelX = bufferX + Math.floor(this.tileRenderSize / 2);
-        const usernamePixelY = bufferY - Math.max(6, Math.floor(this.tileRenderSize / 10));  // Scale overlay offset
+        const usernamePixelX = screenX + Math.floor(this.tileRenderSize / 2);
+        const usernamePixelY = screenY - Math.max(6, Math.floor(this.tileRenderSize / 10));  // Scale overlay offset
 
         this.pendingOverlays.push({
           text: player.username,
@@ -299,26 +412,22 @@ export class ViewportRenderer {
    * Render a placeholder for players without sprites
    * This is a small fallback marker - the actual placeholder sprite is generated separately
    */
-  private renderPlaceholderPlayer(buffer: PixelGrid, player: PlayerVisualState): void {
-    const screenTileX = player.x - this.cameraX;
-    const screenTileY = player.y - this.cameraY;
-
-    if (screenTileX < 0 || screenTileX >= this.config.widthTiles ||
-        screenTileY < 0 || screenTileY >= this.config.heightTiles) {
-      return;
-    }
+  private renderPlaceholderPlayer(buffer: PixelGrid, player: PlayerVisualState, origin: { x: number; y: number }): void {
+    // Calculate screen position (world pixel position minus viewport origin)
+    const worldPixelX = player.x * this.tileRenderSize;
+    const worldPixelY = player.y * this.tileRenderSize;
+    const screenX = Math.round(worldPixelX - origin.x);
+    const screenY = Math.round(worldPixelY - origin.y);
 
     // Marker is same size as current tile render size
     const markerSize = this.tileRenderSize;
-    const bufferX = screenTileX * this.tileRenderSize + this.spriteOverflowX;
-    const bufferY = screenTileY * this.tileRenderSize + this.spriteOverflowY;
 
     // Simple colored square placeholder
     const placeholderColor: RGB = { r: 255, g: 200, b: 50 };
     for (let py = 0; py < markerSize; py++) {
       for (let px = 0; px < markerSize; px++) {
-        const targetY = bufferY + py;
-        const targetX = bufferX + px;
+        const targetY = screenY + py;
+        const targetX = screenX + px;
         if (targetY >= 0 && targetY < buffer.length &&
             targetX >= 0 && targetX < (buffer[targetY]?.length ?? 0)) {
           buffer[targetY]![targetX] = placeholderColor;
@@ -345,10 +454,29 @@ export class ViewportRenderer {
   }
 
   /**
-   * Resize viewport
+   * Resize viewport (tile-based)
    */
   resize(widthTiles: number, heightTiles: number): void {
     this.config.widthTiles = widthTiles;
     this.config.heightTiles = heightTiles;
+  }
+
+  /**
+   * Set exact pixel dimensions for the viewport
+   * This allows filling the entire screen with partial tiles at edges
+   */
+  setPixelDimensions(pixelWidth: number, pixelHeight: number): void {
+    this.config.pixelWidth = pixelWidth;
+    this.config.pixelHeight = pixelHeight;
+  }
+
+  /**
+   * Get current pixel dimensions
+   */
+  getPixelDimensions(): { width: number; height: number } {
+    return {
+      width: this.config.pixelWidth ?? (this.config.widthTiles * this.tileRenderSize),
+      height: this.config.pixelHeight ?? (this.config.heightTiles * this.tileRenderSize),
+    };
   }
 }

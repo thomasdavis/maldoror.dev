@@ -69,6 +69,17 @@ export class InputHandler {
       { key: 'Q', action: 'quit' },
       // Player list
       { key: 'Tab', action: 'toggle_players' },
+      // Camera controls
+      { key: 'c', action: 'toggle_camera_mode' },
+      { key: 'C', action: 'toggle_camera_mode' },
+      { key: 'h', action: 'snap_to_player' },
+      { key: 'H', action: 'snap_to_player' },
+      { key: 'Home', action: 'snap_to_player' },
+      // Shift+arrow for camera pan (independent of mode)
+      { key: 'ArrowUp', shift: true, action: 'pan_camera_up' },
+      { key: 'ArrowDown', shift: true, action: 'pan_camera_down' },
+      { key: 'ArrowLeft', shift: true, action: 'pan_camera_left' },
+      { key: 'ArrowRight', shift: true, action: 'pan_camera_right' },
     ]);
 
     // Chat mode bindings

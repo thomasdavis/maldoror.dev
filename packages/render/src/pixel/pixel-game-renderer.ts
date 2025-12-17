@@ -1,7 +1,10 @@
 import type { Duplex } from 'stream';
 import type { WorldDataProvider } from '@maldoror/protocol';
-import { ViewportRenderer, type ViewportConfig, type TextOverlay } from './viewport-renderer.js';
+import { ViewportRenderer, type ViewportConfig, type TextOverlay, type CameraMode } from './viewport-renderer.js';
 import { renderPixelRow, renderHalfBlockGrid, renderBrailleGrid } from './pixel-renderer.js';
+
+// Re-export for convenience
+export type { CameraMode } from './viewport-renderer.js';
 
 const ESC = '\x1b';
 
@@ -66,15 +69,17 @@ export class PixelGameRenderer {
     this.renderMode = config.renderMode ?? 'halfblock';  // Default to halfblock for good balance
     this.zoomLevel = config.zoomLevel ?? 0;  // Default to 0% zoom (base view, sprite = 1 tile)
 
-    // Calculate viewport size in tiles based on terminal size
+    // Calculate viewport size based on terminal size
     const availableRows = config.rows - STATS_BAR_HEIGHT;
     const currentTileSize = this.getCurrentTileSize();
-
     const { widthTiles, heightTiles } = this.calculateViewportTiles(config.cols, availableRows);
+    const { pixelWidth, pixelHeight } = this.calculatePixelDimensions(config.cols, availableRows);
 
     const viewportConfig: ViewportConfig = {
-      widthTiles: Math.max(3, widthTiles),
-      heightTiles: Math.max(3, heightTiles),
+      widthTiles: Math.max(1, widthTiles),
+      heightTiles: Math.max(1, heightTiles),
+      pixelWidth,  // Actual pixel dimensions to fill entire screen
+      pixelHeight,
       tileRenderSize: currentTileSize,
     };
 
@@ -85,14 +90,53 @@ export class PixelGameRenderer {
    * Get the current tile SCREEN render size based on zoom level
    * This determines how big tiles appear on screen (in pixels)
    * At 0% zoom: small tiles (see lots of world) = 4px per tile
-   * At 100% zoom: large tiles (see detail) = 64px per tile
+   * At 100% zoom: large tiles that fill viewport height (see full character detail)
+   *
+   * Uses exponential scaling so each zoom step feels perceptually even
    */
   private getCurrentTileSize(): number {
     const MIN_TILE_SIZE = 4;   // At 0% zoom, tiles are 4 pixels on screen
-    const MAX_TILE_SIZE = 64;  // At 100% zoom, tiles are 64 pixels on screen
 
-    // Linear interpolation between min and max based on zoom level
-    return Math.round(MIN_TILE_SIZE + (this.zoomLevel / 100) * (MAX_TILE_SIZE - MIN_TILE_SIZE));
+    // Calculate max tile size to fill viewport height (so character is fully visible at 100%)
+    const availableRows = this.rows - STATS_BAR_HEIGHT;
+    let maxTileSize: number;
+    switch (this.renderMode) {
+      case 'braille':
+        maxTileSize = availableRows * 4;  // 4 pixels per row in braille
+        break;
+      case 'halfblock':
+        maxTileSize = availableRows * 2;  // 2 pixels per row in halfblock
+        break;
+      case 'normal':
+      default:
+        maxTileSize = availableRows;      // 1 pixel per row in normal
+        break;
+    }
+
+    // Exponential interpolation for perceptually even zoom steps
+    // Each 10% step multiplies tile size by constant factor
+    // Formula: min * (max/min)^(zoom/100)
+    const ratio = maxTileSize / MIN_TILE_SIZE;
+    const exponent = this.zoomLevel / 100;
+    return Math.round(MIN_TILE_SIZE * Math.pow(ratio, exponent));
+  }
+
+  /**
+   * Calculate actual pixel dimensions available for rendering based on render mode
+   */
+  private calculatePixelDimensions(cols: number, availableRows: number): { pixelWidth: number; pixelHeight: number } {
+    switch (this.renderMode) {
+      case 'braille':
+        // Braille: 1 char = 2 pixels wide, 1 row = 4 pixels tall
+        return { pixelWidth: cols * 2, pixelHeight: availableRows * 4 };
+      case 'halfblock':
+        // Half-block: 1 char = 1 pixel wide, 1 row = 2 pixels tall
+        return { pixelWidth: cols, pixelHeight: availableRows * 2 };
+      case 'normal':
+      default:
+        // Normal: 2 chars = 1 pixel wide, 1 row = 1 pixel tall
+        return { pixelWidth: Math.floor(cols / 2), pixelHeight: availableRows };
+    }
   }
 
   /**
@@ -101,27 +145,7 @@ export class PixelGameRenderer {
    */
   private calculateViewportTiles(cols: number, availableRows: number): { widthTiles: number; heightTiles: number } {
     const tileSize = this.getCurrentTileSize();
-    let pixelWidth: number;
-    let pixelHeight: number;
-
-    switch (this.renderMode) {
-      case 'braille':
-        // Braille: 1 char = 2 pixels wide, 1 row = 4 pixels tall
-        pixelWidth = cols * 2;
-        pixelHeight = availableRows * 4;
-        break;
-      case 'halfblock':
-        // Half-block: 1 char = 1 pixel wide, 1 row = 2 pixels tall
-        pixelWidth = cols;
-        pixelHeight = availableRows * 2;
-        break;
-      case 'normal':
-      default:
-        // Normal: 2 chars = 1 pixel wide, 1 row = 1 pixel tall
-        pixelWidth = cols / 2;
-        pixelHeight = availableRows;
-        break;
-    }
+    const { pixelWidth, pixelHeight } = this.calculatePixelDimensions(cols, availableRows);
 
     return {
       widthTiles: Math.floor(pixelWidth / tileSize),
@@ -178,11 +202,13 @@ export class PixelGameRenderer {
 
     const availableRows = rows - STATS_BAR_HEIGHT;
     const { widthTiles, heightTiles } = this.calculateViewportTiles(cols, availableRows);
+    const { pixelWidth, pixelHeight } = this.calculatePixelDimensions(cols, availableRows);
 
     this.viewportRenderer.resize(
-      Math.max(3, widthTiles),
-      Math.max(3, heightTiles)
+      Math.max(1, widthTiles),
+      Math.max(1, heightTiles)
     );
+    this.viewportRenderer.setPixelDimensions(pixelWidth, pixelHeight);
 
     // Re-center camera after resize
     this.viewportRenderer.setCamera(this.playerX, this.playerY);
@@ -328,7 +354,7 @@ export class PixelGameRenderer {
   }
 
   /**
-   * Render the stats bar showing username, coordinates, zoom, render mode, and debug info
+   * Render the stats bar showing username, coordinates, zoom, render mode, camera mode, and debug info
    */
   private renderStatsBar(): string {
     const tileSize = this.getCurrentTileSize();
@@ -338,10 +364,12 @@ export class PixelGameRenderer {
     const coordStr = `(${this.playerX}, ${this.playerY})`;
     const zoomStr = `${this.zoomLevel}%`;
     const modeStr = this.renderMode.charAt(0).toUpperCase();  // B, H, or N
+    const cameraMode = this.viewportRenderer.getCameraMode();
+    const camStr = cameraMode === 'free' ? ' [FREE]' : '';
     const debugStr = `${tileSize}px ${widthTiles}x${heightTiles}tiles term:${this.cols}x${this.rows}`;
 
     const leftText = ` ${this.username}`;
-    const centerText = `${modeStr}:${zoomStr} [${debugStr}]`;
+    const centerText = `${modeStr}:${zoomStr}${camStr} [${debugStr}]`;
     const rightText = `${coordStr} `;
 
     // Calculate padding for center alignment
@@ -470,11 +498,13 @@ export class PixelGameRenderer {
 
     const availableRows = this.rows - STATS_BAR_HEIGHT;
     const { widthTiles, heightTiles } = this.calculateViewportTiles(this.cols, availableRows);
+    const { pixelWidth, pixelHeight } = this.calculatePixelDimensions(this.cols, availableRows);
 
     this.viewportRenderer.resize(
-      Math.max(3, widthTiles),
-      Math.max(3, heightTiles)
+      Math.max(1, widthTiles),
+      Math.max(1, heightTiles)
     );
+    this.viewportRenderer.setPixelDimensions(pixelWidth, pixelHeight);
 
     // Update camera for new viewport dimensions
     this.viewportRenderer.setCamera(this.playerX, this.playerY);
@@ -520,11 +550,13 @@ export class PixelGameRenderer {
 
     const availableRows = this.rows - STATS_BAR_HEIGHT;
     const { widthTiles, heightTiles } = this.calculateViewportTiles(this.cols, availableRows);
+    const { pixelWidth, pixelHeight } = this.calculatePixelDimensions(this.cols, availableRows);
 
     this.viewportRenderer.resize(
-      Math.max(3, widthTiles),
-      Math.max(3, heightTiles)
+      Math.max(1, widthTiles),
+      Math.max(1, heightTiles)
     );
+    this.viewportRenderer.setPixelDimensions(pixelWidth, pixelHeight);
 
     // Update camera for new viewport dimensions
     this.viewportRenderer.setCamera(this.playerX, this.playerY);
@@ -664,5 +696,69 @@ export class PixelGameRenderer {
     if (output) {
       this.stream.write(output);
     }
+  }
+
+  // ========================================
+  // Camera Control Methods
+  // ========================================
+
+  /**
+   * Get current camera mode ('follow' or 'free')
+   */
+  getCameraMode(): CameraMode {
+    return this.viewportRenderer.getCameraMode();
+  }
+
+  /**
+   * Set camera mode
+   */
+  setCameraMode(mode: CameraMode): void {
+    this.viewportRenderer.setCameraMode(mode);
+  }
+
+  /**
+   * Toggle between 'follow' and 'free' camera modes
+   * Returns the new mode
+   */
+  toggleCameraMode(): CameraMode {
+    return this.viewportRenderer.toggleCameraMode();
+  }
+
+  /**
+   * Pan the camera by pixel offset (for free camera mode)
+   * In follow mode, this has no effect until mode is changed
+   */
+  panCamera(deltaX: number, deltaY: number): void {
+    this.viewportRenderer.panCamera(deltaX, deltaY);
+  }
+
+  /**
+   * Pan the camera by tile offset (more convenient for keyboard controls)
+   * Pans by the current tile render size
+   */
+  panCameraByTiles(deltaTilesX: number, deltaTilesY: number): void {
+    this.viewportRenderer.panCameraByTiles(deltaTilesX, deltaTilesY);
+  }
+
+  /**
+   * Snap camera back to follow target (player position)
+   * Useful after panning in free mode
+   */
+  snapCameraToPlayer(): void {
+    this.viewportRenderer.snapToTarget();
+  }
+
+  /**
+   * Get camera center in world pixels
+   */
+  getCameraCenter(): { x: number; y: number } {
+    return this.viewportRenderer.getCameraCenter();
+  }
+
+  /**
+   * Get camera center in tile coordinates
+   */
+  getCameraTilePosition(): { x: number; y: number } {
+    return this.viewportRenderer.getCameraTilePosition();
   }
 }
