@@ -145,6 +145,9 @@ export class AvatarScreen {
     this.render();
 
     try {
+      if (!this.providerConfig.apiKey) {
+        throw new Error('API key not configured');
+      }
       // Use image-based generation for better quality sprites
       const result = await generateImageSprite({
         description: this.prompt,

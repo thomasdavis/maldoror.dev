@@ -1,7 +1,7 @@
 import type { Duplex } from 'stream';
 import type { WorldDataProvider } from '@maldoror/protocol';
 import { TILE_SIZE } from '@maldoror/protocol';
-import { ViewportRenderer, type ViewportConfig } from './viewport-renderer.js';
+import { ViewportRenderer, type ViewportConfig, type TextOverlay } from './viewport-renderer.js';
 import { downsampleGrid, renderPixelRow, renderHalfBlockGrid, renderBrailleGrid } from './pixel-renderer.js';
 
 const ESC = '\x1b';
@@ -196,11 +196,18 @@ export class PixelGameRenderer {
     // Generate stats bar
     const statsBar = this.renderStatsBar();
 
-    // Render viewport to raw pixel buffer
-    const fullBuffer = this.viewportRenderer.renderToBuffer(world, this.tickCount);
+    // Render viewport to raw pixel buffer with overlays
+    const { buffer: fullBuffer, overlays } = this.viewportRenderer.renderToBuffer(world, this.tickCount);
 
     // Downsample if scale > 1
     const scaledBuffer = this.scale > 1 ? downsampleGrid(fullBuffer, this.scale) : fullBuffer;
+
+    // Scale overlay positions to match downsampled buffer
+    const scaledOverlays = overlays.map(o => ({
+      ...o,
+      pixelX: Math.floor(o.pixelX / this.scale),
+      pixelY: Math.floor(o.pixelY / this.scale),
+    }));
 
     // Convert to ANSI lines based on render mode
     let viewportLines: string[];
@@ -232,8 +239,37 @@ export class PixelGameRenderer {
     // Combine stats bar + viewport
     const lines = [statsBar, ...paddedLines];
 
-    // Output to stream
-    this.outputFrame(lines);
+    // Output to stream with overlays
+    this.outputFrame(lines, scaledOverlays);
+  }
+
+  /**
+   * Convert pixel position to terminal position based on render mode
+   */
+  private pixelToTerminal(pixelX: number, pixelY: number): { row: number; col: number } {
+    let row: number;
+    let col: number;
+
+    switch (this.renderMode) {
+      case 'braille':
+        // Braille: 4 pixels per row, 2 pixels per char
+        row = Math.floor(pixelY / 4);
+        col = Math.floor(pixelX / 2);
+        break;
+      case 'halfblock':
+        // Half-block: 2 pixels per row, 1 pixel per char
+        row = Math.floor(pixelY / 2);
+        col = pixelX;
+        break;
+      case 'normal':
+      default:
+        // Normal: 1 pixel per row, 2 chars per pixel
+        row = pixelY;
+        col = pixelX * 2;
+        break;
+    }
+
+    return { row, col };
   }
 
   /**
@@ -317,11 +353,14 @@ export class PixelGameRenderer {
   /**
    * Output frame to stream with minimal updates
    */
-  private outputFrame(lines: string[]): void {
+  private outputFrame(lines: string[], overlays: TextOverlay[] = []): void {
     let output = '';
     const bgColor = `${ESC}[48;2;20;20;25m`;
 
-    if (this.forceRedraw || this.previousOutput.length !== lines.length) {
+    // Force full redraw when overlays are present (they need clean backgrounds)
+    const hasOverlays = overlays.length > 0;
+
+    if (this.forceRedraw || this.previousOutput.length !== lines.length || hasOverlays) {
       // Full redraw - write every line from the top
       output += `${ESC}[H`;  // Move to home
       for (let y = 0; y < lines.length; y++) {
@@ -339,6 +378,28 @@ export class PixelGameRenderer {
           output += lines[y] + `${ESC}[0m`;
         }
       }
+    }
+
+    // Render text overlays (usernames above players)
+    for (const overlay of overlays) {
+      const { row, col } = this.pixelToTerminal(overlay.pixelX, overlay.pixelY);
+
+      // Account for stats bar (+1) and 1-based terminal rows (+1)
+      const terminalRow = row + STATS_BAR_HEIGHT + 1;
+
+      // Skip if out of bounds
+      if (terminalRow < 1 || terminalRow > this.rows) continue;
+
+      // Center the text
+      const textLen = overlay.text.length + 2;  // +2 for padding spaces
+      const startCol = Math.max(1, col - Math.floor(textLen / 2) + 1);
+
+      // Build the overlay text with ANSI colors
+      const bg = `${ESC}[48;2;${overlay.bgColor.r};${overlay.bgColor.g};${overlay.bgColor.b}m`;
+      const fg = `${ESC}[38;2;${overlay.fgColor.r};${overlay.fgColor.g};${overlay.fgColor.b}m`;
+      const reset = `${ESC}[0m`;
+
+      output += `${ESC}[${terminalRow};${startCol}H${bg}${fg} ${overlay.text} ${reset}`;
     }
 
     if (output) {

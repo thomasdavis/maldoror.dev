@@ -45,6 +45,7 @@ export class GameSession {
   private inputSequence: number = 0;
   private moveTimer: NodeJS.Timeout | null = null;
   private currentPrompt: string = '';
+  private showPlayerList: boolean = false;
 
   constructor(config: GameSessionConfig) {
     this.stream = config.stream;
@@ -146,7 +147,7 @@ export class GameSession {
     });
 
     // Register with game server
-    await this.gameServer.playerConnect(this.userId!, this.sessionId);
+    await this.gameServer.playerConnect(this.userId!, this.sessionId, this.username);
 
     // Register for sprite reload events
     this.gameServer.onSpriteReload(this.userId!, (changedUserId) => {
@@ -220,6 +221,82 @@ export class GameSession {
 
     // Render frame
     this.renderer.render(this.tileProvider);
+
+    // Render player list overlay if showing
+    if (this.showPlayerList) {
+      this.renderPlayerListOverlay();
+    }
+  }
+
+  /**
+   * Render the player list overlay (Tab menu)
+   */
+  private renderPlayerListOverlay(): void {
+    const ESC = '\x1b';
+    const players = this.gameServer.getAllPlayers();
+
+    // Calculate overlay dimensions
+    const overlayWidth = 50;
+    const overlayHeight = Math.min(players.length + 4, 20);
+    const startX = Math.floor((this.cols - overlayWidth) / 2);
+    const startY = Math.floor((this.rows - overlayHeight) / 2);
+
+    // Semi-transparent background using dark color
+    const bgColor = `${ESC}[48;2;20;20;35m`;
+    const borderColor = `${ESC}[38;2;100;100;150m`;
+    const headerColor = `${ESC}[38;2;255;200;100m`;
+    const textColor = `${ESC}[38;2;200;200;200m`;
+    const selfColor = `${ESC}[38;2;100;255;150m`;
+    const reset = `${ESC}[0m`;
+
+    let output = '';
+
+    // Draw overlay box
+    // Top border
+    output += `${ESC}[${startY};${startX}H${bgColor}${borderColor}╔${'═'.repeat(overlayWidth - 2)}╗`;
+
+    // Title row
+    const title = ` PLAYERS ONLINE (${players.length}) `;
+    const titlePad = Math.floor((overlayWidth - 2 - title.length) / 2);
+    output += `${ESC}[${startY + 1};${startX}H${bgColor}${borderColor}║${' '.repeat(titlePad)}${headerColor}${title}${borderColor}${' '.repeat(overlayWidth - 2 - titlePad - title.length)}║`;
+
+    // Separator
+    output += `${ESC}[${startY + 2};${startX}H${bgColor}${borderColor}╟${'─'.repeat(overlayWidth - 2)}╢`;
+
+    // Column headers
+    const nameHeader = 'Name';
+    const posHeader = 'Position';
+    const pingHeader = 'Ping';
+    output += `${ESC}[${startY + 3};${startX}H${bgColor}${borderColor}║ ${headerColor}${nameHeader.padEnd(20)}${posHeader.padEnd(18)}${pingHeader.padEnd(8)}${borderColor}║`;
+
+    // Player rows
+    const maxPlayers = Math.min(players.length, overlayHeight - 5);
+    for (let i = 0; i < maxPlayers; i++) {
+      const player = players[i]!;
+      const isSelf = player.userId === this.userId;
+      const color = isSelf ? selfColor : textColor;
+      const name = (isSelf ? '► ' : '  ') + player.username.slice(0, 16).padEnd(18);
+      const pos = `(${player.x}, ${player.y})`.padEnd(18);
+      const ping = '--ms'.padEnd(8);  // TODO: actual ping
+
+      output += `${ESC}[${startY + 4 + i};${startX}H${bgColor}${borderColor}║${color}${name}${pos}${ping}${borderColor}║`;
+    }
+
+    // Fill remaining rows
+    for (let i = maxPlayers; i < overlayHeight - 5; i++) {
+      output += `${ESC}[${startY + 4 + i};${startX}H${bgColor}${borderColor}║${' '.repeat(overlayWidth - 2)}║`;
+    }
+
+    // Bottom border
+    output += `${ESC}[${startY + overlayHeight - 1};${startX}H${bgColor}${borderColor}╚${'═'.repeat(overlayWidth - 2)}╝`;
+
+    // Footer hint
+    const hint = ' Press TAB to close ';
+    output += `${ESC}[${startY + overlayHeight};${startX + Math.floor((overlayWidth - hint.length) / 2)}H${textColor}${hint}`;
+
+    output += reset;
+
+    this.stream.write(output);
   }
 
   private getPlayerColor(userId: string): { r: number; g: number; b: number } {
@@ -263,6 +340,10 @@ export class GameSession {
         break;
       case 'regenerate_avatar':
         this.openAvatarScreen();
+        break;
+      case 'toggle_players':
+        this.showPlayerList = !this.showPlayerList;
+        this.renderer?.invalidate();
         break;
       case 'quit':
         this.quit();

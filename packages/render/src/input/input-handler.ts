@@ -67,6 +67,8 @@ export class InputHandler {
       // Quit
       { key: 'q', action: 'quit' },
       { key: 'Q', action: 'quit' },
+      // Player list
+      { key: 'Tab', action: 'toggle_players' },
     ]);
 
     // Chat mode bindings

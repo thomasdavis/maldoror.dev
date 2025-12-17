@@ -105,19 +105,20 @@ export class GameServer {
   /**
    * Handle player connection
    */
-  async playerConnect(userId: string, sessionId: string): Promise<void> {
+  async playerConnect(userId: string, sessionId: string, username: string): Promise<void> {
     const existing = this.players.get(userId);
 
     if (existing) {
       // Reconnect
       existing.sessionId = sessionId;
+      existing.username = username;
       existing.isOnline = true;
     } else {
       // New player
       this.players.set(userId, {
         userId,
         sessionId,
-        username: '', // Will be set by session
+        username,
         x: 0,
         y: 0,
         direction: 'down',
@@ -240,6 +241,34 @@ export class GameServer {
         };
       })
       .filter((p): p is NonNullable<typeof p> => p !== null);
+  }
+
+  /**
+   * Get all online players
+   */
+  getAllPlayers(): Array<{
+    userId: string;
+    username: string;
+    x: number;
+    y: number;
+    isOnline: boolean;
+  }> {
+    return Array.from(this.players.values())
+      .filter(p => p.isOnline)
+      .map(p => ({
+        userId: p.userId,
+        username: p.username || 'Unknown',
+        x: p.x,
+        y: p.y,
+        isOnline: p.isOnline,
+      }));
+  }
+
+  /**
+   * Get online player count
+   */
+  getOnlineCount(): number {
+    return Array.from(this.players.values()).filter(p => p.isOnline).length;
   }
 
   /**

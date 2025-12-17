@@ -18,6 +18,25 @@ export interface ViewportConfig {
   heightTiles: number;  // Viewport height in tiles
 }
 
+/**
+ * Text overlay to render on top of the pixel buffer
+ */
+export interface TextOverlay {
+  text: string;
+  pixelX: number;  // X position in pixels (will be converted to terminal chars)
+  pixelY: number;  // Y position in pixels (will be converted to terminal rows)
+  bgColor: RGB;
+  fgColor: RGB;
+}
+
+/**
+ * Result of rendering the viewport
+ */
+export interface ViewportRenderResult {
+  buffer: PixelGrid;
+  overlays: TextOverlay[];
+}
+
 // Re-export for convenience
 export type { WorldDataProvider } from '@maldoror/protocol';
 
@@ -28,6 +47,7 @@ export class ViewportRenderer {
   private config: ViewportConfig;
   private cameraX: number = 0;  // Camera position in tiles
   private cameraY: number = 0;
+  private pendingOverlays: TextOverlay[] = [];  // Collected during render
 
   constructor(config: ViewportConfig) {
     this.config = config;
@@ -45,14 +65,17 @@ export class ViewportRenderer {
    * Render the viewport and return array of ANSI strings (one per terminal row)
    */
   render(world: WorldDataProvider, tick: number): string[] {
-    const buffer = this.renderToBuffer(world, tick);
-    return this.bufferToAnsi(buffer);
+    const result = this.renderToBuffer(world, tick);
+    return this.bufferToAnsi(result.buffer);
   }
 
   /**
-   * Render the viewport to a raw pixel buffer
+   * Render the viewport to a raw pixel buffer with text overlays
    */
-  renderToBuffer(world: WorldDataProvider, tick: number): PixelGrid {
+  renderToBuffer(world: WorldDataProvider, tick: number): ViewportRenderResult {
+    // Reset overlays for this frame
+    this.pendingOverlays = [];
+
     // Calculate pixel dimensions
     const pixelWidth = this.config.widthTiles * TILE_SIZE;
     const pixelHeight = this.config.heightTiles * TILE_SIZE;
@@ -66,7 +89,10 @@ export class ViewportRenderer {
     // 2. Render players (sorted by Y for proper overlap)
     this.renderPlayers(buffer, world, tick);
 
-    return buffer;
+    return {
+      buffer,
+      overlays: this.pendingOverlays,
+    };
   }
 
   /**
@@ -158,9 +184,19 @@ export class ViewportRenderer {
         }
       }
 
-      // Draw username above sprite for other players
+      // Add username overlay above sprite for other players
       if (player.userId !== localId) {
-        this.renderUsername(buffer, player.username, bufferX, bufferY - 2);
+        // Center the username above the sprite
+        const usernamePixelX = bufferX + Math.floor(PIXEL_SPRITE_WIDTH / 2);
+        const usernamePixelY = bufferY - 6;  // 6 pixels above sprite
+
+        this.pendingOverlays.push({
+          text: player.username,
+          pixelX: usernamePixelX,
+          pixelY: usernamePixelY,
+          bgColor: { r: 40, g: 40, b: 60 },    // Dark blue-gray background
+          fgColor: { r: 255, g: 255, b: 255 }, // White text
+        });
       }
     }
   }
@@ -190,21 +226,6 @@ export class ViewportRenderer {
             targetX >= 0 && targetX < (buffer[targetY]?.length ?? 0)) {
           buffer[targetY]![targetX] = placeholderColor;
         }
-      }
-    }
-  }
-
-  /**
-   * Render username text (simplified - just a colored bar)
-   */
-  private renderUsername(buffer: PixelGrid, _username: string, x: number, y: number): void {
-    // For now, just render a simple colored indicator
-    const nameColor: RGB = { r: 255, g: 255, b: 255 };
-    for (let px = 0; px < 12; px++) {
-      const targetX = x + px;
-      if (y >= 0 && y < buffer.length &&
-          targetX >= 0 && targetX < (buffer[y]?.length ?? 0)) {
-        buffer[y]![targetX] = nameColor;
       }
     }
   }
