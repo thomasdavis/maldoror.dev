@@ -404,6 +404,33 @@ export function scaleGrid(grid: PixelGrid, factor: number): PixelGrid {
 }
 
 /**
+ * Quantize a color to reduce bit depth
+ * bits=4 means 16 levels per channel instead of 256
+ * This improves ANSI color code deduplication
+ */
+export function quantizeColor(color: RGB, bits: number): RGB {
+  if (bits >= 8) return color;
+  const shift = 8 - bits;
+  const mask = (0xFF << shift) & 0xFF;
+  return {
+    r: color.r & mask,
+    g: color.g & mask,
+    b: color.b & mask,
+  };
+}
+
+/**
+ * Quantize all colors in a pixel grid
+ * Reduces unique colors for better ANSI deduplication
+ */
+export function quantizeGrid(grid: PixelGrid, bits: number): PixelGrid {
+  if (bits >= 8) return grid;
+  return grid.map(row =>
+    row.map(pixel => pixel === null ? null : quantizeColor(pixel, bits))
+  );
+}
+
+/**
  * Downsample a pixel grid by a factor (zoom out)
  * Uses nearest-neighbor sampling for crisp pixel art
  * Supports non-integer scale factors

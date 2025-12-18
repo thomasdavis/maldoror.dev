@@ -70,11 +70,14 @@ export class GameSession {
   }> = [];
   private lastQueryX: number = -999;
   private lastQueryY: number = -999;
+  private tickCounter: number = 0;
   // Performance: Track sprites being loaded to prevent duplicate DB queries
   private loadingSprites: Set<string> = new Set();
   // Hot reload state
   private reloadState: ReloadState = 'running';
   private unsubscribeReload: (() => void) | null = null;
+  // Adaptive tick rate based on zoom level
+  private currentTickMs: number = 67;  // Default 15fps
 
   constructor(config: GameSessionConfig) {
     this.stream = config.stream;
@@ -242,9 +245,13 @@ export class GameSession {
       this.updateLocalPlayerState();
     }
 
-    // Performance: Only re-query visible players when position changes
+    // Increment tick counter for periodic refreshes
+    this.tickCounter++;
+
+    // Refresh visible players when position changes OR periodically (every ~1 second = 15 ticks)
     const positionChanged = this.playerX !== this.lastQueryX || this.playerY !== this.lastQueryY;
-    if (positionChanged) {
+    const periodicRefresh = this.tickCounter % 15 === 0;
+    if (positionChanged || periodicRefresh) {
       this.cachedVisiblePlayers = await this.workerManager.getVisiblePlayers(
         this.playerX,
         this.playerY,
@@ -456,9 +463,11 @@ export class GameSession {
         break;
       case 'zoom_in':
         this.renderer?.zoomIn();
+        this.updateTickInterval();
         break;
       case 'zoom_out':
         this.renderer?.zoomOut();
+        this.updateTickInterval();
         break;
       case 'cycle_render_mode':
         this.renderer?.cycleRenderMode();
@@ -911,6 +920,38 @@ export class GameSession {
     this.rows = rows;
     if (this.renderer) {
       this.renderer.resize(cols, rows);
+    }
+  }
+
+  /**
+   * Calculate appropriate tick interval based on zoom level
+   * Higher zoom = more pixels = slower updates acceptable
+   */
+  private getTargetTickMs(): number {
+    if (!this.renderer) return 67;
+    const zoom = this.renderer.getZoomLevel();
+
+    // 0-30% zoom: 67ms (15 fps) - less data, can update fast
+    // 40-60% zoom: 100ms (10 fps) - medium data
+    // 70-100% zoom: 150ms (~7 fps) - lots of data, slow updates ok
+    if (zoom <= 30) return 67;
+    if (zoom <= 60) return 100;
+    return 150;
+  }
+
+  /**
+   * Update tick interval based on current zoom level
+   */
+  private updateTickInterval(): void {
+    const targetMs = this.getTargetTickMs();
+    if (targetMs === this.currentTickMs) return;  // No change needed
+
+    this.currentTickMs = targetMs;
+
+    // Restart tick interval with new timing
+    if (this.tickInterval) {
+      clearInterval(this.tickInterval);
+      this.tickInterval = setInterval(() => this.tick(), this.currentTickMs);
     }
   }
 

@@ -1,7 +1,7 @@
 import type { Duplex } from 'stream';
 import type { WorldDataProvider } from '@maldoror/protocol';
 import { ViewportRenderer, type ViewportConfig, type TextOverlay, type CameraMode } from './viewport-renderer.js';
-import { renderPixelRow, renderHalfBlockGrid, renderBrailleGrid } from './pixel-renderer.js';
+import { renderPixelRow, renderHalfBlockGrid, renderBrailleGrid, quantizeGrid } from './pixel-renderer.js';
 
 // Re-export for convenience
 export type { CameraMode } from './viewport-renderer.js';
@@ -60,6 +60,16 @@ export class PixelGameRenderer {
   private playerY: number = 0;
   private zoomLevel: number;  // 100 = full resolution, 50 = half (zoomed out), etc.
   private renderMode: RenderMode;
+  // FPS tracking
+  private frameCount: number = 0;
+  private fps: number = 0;
+  private lastFpsUpdate: number = Date.now();
+  private lastRenderTime: number = 0;
+  private lastFrameBytes: number = 0;
+  // Frame skip tracking - skip rendering when nothing changed
+  private previousCameraX: number = -1;
+  private previousCameraY: number = -1;
+  private framesSkipped: number = 0;
 
   constructor(config: PixelGameRendererConfig) {
     this.stream = config.stream;
@@ -67,7 +77,7 @@ export class PixelGameRenderer {
     this.rows = config.rows;
     this.username = config.username ?? 'Unknown';
     this.renderMode = config.renderMode ?? 'halfblock';  // Default to halfblock for good balance
-    this.zoomLevel = config.zoomLevel ?? 0;  // Default to 0% zoom (base view, sprite = 1 tile)
+    this.zoomLevel = config.zoomLevel ?? 100;  // Default to 100% zoom (most zoomed in)
 
     // Calculate viewport size based on terminal size
     const availableRows = config.rows - STATS_BAR_HEIGHT;
@@ -237,7 +247,38 @@ export class PixelGameRenderer {
    * Render a frame
    */
   render(world: WorldDataProvider): void {
+    const renderStart = Date.now();
     this.tickCount++;
+
+    // Update FPS tracking
+    this.frameCount++;
+    const now = Date.now();
+    if (now - this.lastFpsUpdate >= 1000) {
+      this.fps = this.frameCount;
+      this.frameCount = 0;
+      this.lastFpsUpdate = now;
+    }
+
+    // Check if camera (player position) has changed
+    const cameraChanged = this.playerX !== this.previousCameraX ||
+                          this.playerY !== this.previousCameraY;
+    this.previousCameraX = this.playerX;
+    this.previousCameraY = this.playerY;
+
+    // Skip expensive rendering if nothing changed
+    if (!cameraChanged && !this.forceRedraw && this.previousOutput.length > 0) {
+      this.framesSkipped++;
+      // Just update the stats bar (first line) to show we're still alive
+      const statsBar = this.renderStatsBar();
+      const output = `${ESC}[1;1H${statsBar}${ESC}[0m`;
+      this.lastFrameBytes = Buffer.byteLength(output, 'utf8');
+      this.stream.write(output);
+      this.lastRenderTime = Date.now() - renderStart;
+      return;
+    }
+
+    // Reset skipped counter on actual render
+    this.framesSkipped = 0;
 
     // Generate stats bar
     const statsBar = this.renderStatsBar();
@@ -245,21 +286,31 @@ export class PixelGameRenderer {
     // Render viewport to raw pixel buffer with overlays (already at correct resolution)
     const { buffer, overlays } = this.viewportRenderer.renderToBuffer(world, this.tickCount);
 
+    // Apply color quantization at high zoom levels to reduce ANSI codes
+    // At zoom > 50%, use 5-bit color (32 levels per channel)
+    // At zoom > 70%, use 4-bit color (16 levels per channel)
+    let quantizedBuffer = buffer;
+    if (this.zoomLevel > 70) {
+      quantizedBuffer = quantizeGrid(buffer, 4);
+    } else if (this.zoomLevel > 50) {
+      quantizedBuffer = quantizeGrid(buffer, 5);
+    }
+
     // Convert to ANSI lines based on render mode
     let viewportLines: string[];
     switch (this.renderMode) {
       case 'braille':
         // Braille mode: 8 subpixels per character (2×4 dots) - HIGHEST RES
-        viewportLines = renderBrailleGrid(buffer);
+        viewportLines = renderBrailleGrid(quantizedBuffer);
         break;
       case 'halfblock':
         // Half-block mode: 2 pixels per row, 1 char per pixel
-        viewportLines = renderHalfBlockGrid(buffer);
+        viewportLines = renderHalfBlockGrid(quantizedBuffer);
         break;
       case 'normal':
       default:
         // Normal mode: 1 pixel per row, 2 chars per pixel
-        viewportLines = buffer.map(row => renderPixelRow(row));
+        viewportLines = quantizedBuffer.map(row => renderPixelRow(row));
         break;
     }
 
@@ -277,6 +328,9 @@ export class PixelGameRenderer {
 
     // Output to stream with overlays
     this.outputFrame(lines, overlays);
+
+    // Track render time for next frame's display
+    this.lastRenderTime = Date.now() - renderStart;
   }
 
   /**
@@ -366,10 +420,15 @@ export class PixelGameRenderer {
     const modeStr = this.renderMode.charAt(0).toUpperCase();  // B, H, or N
     const cameraMode = this.viewportRenderer.getCameraMode();
     const camStr = cameraMode === 'free' ? ' [FREE]' : '';
-    const debugStr = `${tileSize}px ${widthTiles}x${heightTiles}tiles term:${this.cols}x${this.rows}`;
+    const bytesStr = this.lastFrameBytes >= 1024
+      ? `${(this.lastFrameBytes / 1024).toFixed(0)}KB`
+      : `${this.lastFrameBytes}B`;
+    const skipStr = this.framesSkipped > 0 ? ` skip:${this.framesSkipped}` : '';
+    const fpsStr = `${this.fps}fps ${this.lastRenderTime}ms ${bytesStr}${skipStr}`;
+    const debugStr = `${tileSize}px ${widthTiles}x${heightTiles}t`;
 
     const leftText = ` ${this.username}`;
-    const centerText = `${modeStr}:${zoomStr}${camStr} [${debugStr}]`;
+    const centerText = `${modeStr}:${zoomStr}${camStr} [${fpsStr}] [${debugStr}]`;
     const rightText = `${coordStr} `;
 
     // Calculate padding for center alignment
@@ -442,6 +501,7 @@ export class PixelGameRenderer {
     }
 
     if (output) {
+      this.lastFrameBytes = Buffer.byteLength(output, 'utf8');
       this.stream.write(output);
     }
     this.previousOutput = [...lines];
@@ -601,18 +661,26 @@ export class PixelGameRenderer {
     // Render viewport to raw pixel buffer with overlays (already at correct resolution)
     const { buffer, overlays } = this.viewportRenderer.renderToBuffer(world, this.tickCount);
 
+    // Apply color quantization at high zoom levels to reduce ANSI codes
+    let quantizedBuffer = buffer;
+    if (this.zoomLevel > 70) {
+      quantizedBuffer = quantizeGrid(buffer, 4);
+    } else if (this.zoomLevel > 50) {
+      quantizedBuffer = quantizeGrid(buffer, 5);
+    }
+
     // Convert to ANSI lines based on render mode
     let viewportLines: string[];
     switch (this.renderMode) {
       case 'braille':
-        viewportLines = renderBrailleGrid(buffer);
+        viewportLines = renderBrailleGrid(quantizedBuffer);
         break;
       case 'halfblock':
-        viewportLines = renderHalfBlockGrid(buffer);
+        viewportLines = renderHalfBlockGrid(quantizedBuffer);
         break;
       case 'normal':
       default:
-        viewportLines = buffer.map(row => renderPixelRow(row));
+        viewportLines = quantizedBuffer.map(row => renderPixelRow(row));
         break;
     }
 
