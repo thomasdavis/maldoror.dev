@@ -88,14 +88,17 @@ export async function loadBuildingTile(
 
 /**
  * Load a full building sprite from disk
- * This reconstructs the BuildingSprite from individual PNGs
- * Use sparingly - prefer loadBuildingTile for specific resolutions
+ * OPTIMIZED: Only loads base resolution (256) to avoid memory explosion
+ * The renderer's scaling cache handles other resolutions on-demand
  */
 export async function loadBuildingFromDisk(buildingId: string): Promise<BuildingSprite | null> {
-  // Check if any tiles exist for this building
+  // Only check for base resolution tiles (256)
   const tileRecords = await db.select()
     .from(schema.buildingTiles)
-    .where(eq(schema.buildingTiles.buildingId, buildingId));
+    .where(and(
+      eq(schema.buildingTiles.buildingId, buildingId),
+      eq(schema.buildingTiles.resolution, 256)
+    ));
 
   if (tileRecords.length === 0) {
     return null;
@@ -120,17 +123,13 @@ export async function loadBuildingFromDisk(buildingId: string): Promise<Building
     sprite.tiles.push(row);
   }
 
-  // Load each PNG file
+  // Load only base resolution (9 files instead of 90)
   for (const record of tileRecords) {
-    const pixels = await loadBuildingTile(buildingId, record.tileX, record.tileY, record.resolution);
+    const pixels = await loadBuildingTile(buildingId, record.tileX, record.tileY, 256);
     if (pixels) {
       const tile = sprite.tiles[record.tileY]?.[record.tileX];
       if (tile) {
-        tile.resolutions[String(record.resolution)] = pixels;
-        // Use base resolution (256) as the default pixels
-        if (record.resolution === 256) {
-          tile.pixels = pixels;
-        }
+        tile.pixels = pixels;
       }
     }
   }

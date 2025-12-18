@@ -124,14 +124,17 @@ export async function loadDirectionFrames(
 
 /**
  * Load a full sprite from disk
- * This reconstructs the Sprite from individual PNGs
- * Use sparingly - prefer loadSpriteFrame for specific frames
+ * OPTIMIZED: Only loads base resolution (256) to avoid memory explosion
+ * The renderer's scaling cache handles other resolutions on-demand
  */
 export async function loadSpriteFromDisk(userId: string): Promise<Sprite | null> {
-  // Check if any frames exist for this user
+  // Only check for base resolution frames (256)
   const frameRecords = await db.select()
     .from(schema.spriteFrames)
-    .where(eq(schema.spriteFrames.userId, userId));
+    .where(and(
+      eq(schema.spriteFrames.userId, userId),
+      eq(schema.spriteFrames.resolution, 256)
+    ));
 
   if (frameRecords.length === 0) {
     return null;
@@ -142,7 +145,7 @@ export async function loadSpriteFromDisk(userId: string): Promise<Sprite | null>
   const width = firstRecord?.width ?? 256;
   const height = firstRecord?.height ?? 256;
 
-  // Initialize the sprite structure
+  // Initialize the sprite structure - only base frames, no pre-loaded resolutions
   const sprite: Sprite = {
     width,
     height,
@@ -155,40 +158,12 @@ export async function loadSpriteFromDisk(userId: string): Promise<Sprite | null>
     resolutions: {},
   };
 
-  // Group records by resolution
-  const byResolution = new Map<number, typeof frameRecords>();
+  // Load only base resolution frames (16 files instead of 160)
   for (const record of frameRecords) {
-    if (!byResolution.has(record.resolution)) {
-      byResolution.set(record.resolution, []);
-    }
-    byResolution.get(record.resolution)!.push(record);
-  }
-
-  // Load frames for each resolution
-  for (const [resolution, records] of byResolution) {
-    const resKey = String(resolution);
-
-    // Initialize resolution entry
-    if (!sprite.resolutions![resKey]) {
-      sprite.resolutions![resKey] = {
-        up: [[], [], [], []] as unknown as DirectionFrames,
-        down: [[], [], [], []] as unknown as DirectionFrames,
-        left: [[], [], [], []] as unknown as DirectionFrames,
-        right: [[], [], [], []] as unknown as DirectionFrames,
-      };
-    }
-
-    for (const record of records) {
-      const pixels = await loadSpriteFrame(userId, record.direction, record.frameNum, record.resolution);
-      if (pixels) {
-        const dir = record.direction as Direction;
-        sprite.resolutions![resKey][dir][record.frameNum] = pixels;
-
-        // Use resolution 256 as base frames
-        if (resolution === 256) {
-          sprite.frames[dir][record.frameNum] = pixels;
-        }
-      }
+    const pixels = await loadSpriteFrame(userId, record.direction, record.frameNum, 256);
+    if (pixels) {
+      const dir = record.direction as Direction;
+      sprite.frames[dir][record.frameNum] = pixels;
     }
   }
 
