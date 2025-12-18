@@ -57,5 +57,6 @@ ENV NODE_ENV=production
 ENV SSH_HOST_KEY_PATH=/app/apps/ssh-world/keys/host.key
 
 EXPOSE 2222
+EXPOSE 3000
 
 ENTRYPOINT ["/docker-entrypoint.sh"]

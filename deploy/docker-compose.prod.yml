@@ -36,7 +36,9 @@ services:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
-    # No external ports - HAProxy handles external traffic
+    # HAProxy handles SSH traffic, stats port exposed directly
+    ports:
+      - "3000:3000"  # Stats endpoint
     expose:
       - "2222"
     env_file:
