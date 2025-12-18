@@ -81,14 +81,19 @@ export class SSHServer {
       remoteAddress: info.ip,
       connectedAt: new Date(),
     };
+    let didAttemptAuth = false;
 
-    console.log(`New connection from ${info.ip}`);
+    // Don't log connection here - wait to see if it's a real auth attempt
+    // (HAProxy health checks connect and immediately disconnect)
 
     client.on('authentication', async (ctx) => {
+      didAttemptAuth = true;
+
       if (ctx.method === 'publickey') {
         // Extract fingerprint
         const fingerprint = this.extractFingerprint(ctx.key);
         context.fingerprint = fingerprint;
+        console.log(`Auth attempt from ${info.ip} (key: ${fingerprint.slice(0, 16)}...)`);
         // Don't use ctx.username - that's the computer's username
         // Username will be set from database for returning users, or onboarding for new users
         context.username = '';
@@ -133,8 +138,10 @@ export class SSHServer {
     });
 
     client.on('end', () => {
-      console.log(`Client disconnected: ${context.fingerprint?.slice(0, 16)}...`);
-      if (context.fingerprint) {
+      // Only log disconnects for clients that actually tried to auth
+      // (Silently ignore HAProxy health check disconnects)
+      if (didAttemptAuth && context.fingerprint) {
+        console.log(`Client disconnected: ${context.fingerprint.slice(0, 16)}...`);
         this.handleDisconnect(context.fingerprint);
       }
     });

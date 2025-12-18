@@ -71,9 +71,13 @@ interface WorldStats {
   };
 }
 
+// Cache stats for 30 seconds to avoid hammering DB
+const STATS_CACHE_TTL_MS = 30000;
+
 export class StatsServer {
   private server: ReturnType<typeof createServer>;
   private config: StatsServerConfig;
+  private statsCache: { data: WorldStats; timestamp: number } | null = null;
 
   constructor(config: StatsServerConfig) {
     this.config = config;
@@ -106,7 +110,7 @@ export class StatsServer {
 
     if (url.pathname === '/stats' || url.pathname === '/stats/') {
       try {
-        const stats = await this.gatherStats();
+        const stats = await this.getCachedStats();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(stats, null, 2));
       } catch (error) {
@@ -541,6 +545,21 @@ export class StatsServer {
       'Cache-Control': 'public, max-age=3600',
     });
     res.end(data);
+  }
+
+  /**
+   * Get cached stats or refresh if stale (30s TTL)
+   * Prevents DB hammering if /stats is polled frequently
+   */
+  private async getCachedStats(): Promise<WorldStats> {
+    const now = Date.now();
+    if (this.statsCache && (now - this.statsCache.timestamp) < STATS_CACHE_TTL_MS) {
+      return this.statsCache.data;
+    }
+
+    const stats = await this.gatherStats();
+    this.statsCache = { data: stats, timestamp: now };
+    return stats;
   }
 
   private formatUptime(seconds: number): string {
