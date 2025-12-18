@@ -49,6 +49,44 @@ export function fgColor(color: RGB): string {
  */
 const PIXEL_CHARS = '  ';
 
+// ============================================
+// Cell-Level Diffing Types
+// ============================================
+
+/**
+ * A terminal cell for cell-level diffing
+ * Stores structured data instead of ANSI strings
+ */
+export interface TerminalCell {
+  char: string;           // ' ', '  ', '▀', or braille char
+  fgColor: RGB | null;    // Foreground color (for halfblock/braille)
+  bgColor: RGB | null;    // Background color
+}
+
+/**
+ * Grid of terminal cells for diffing
+ */
+export type CellGrid = TerminalCell[][];
+
+/**
+ * Check if two colors are equal
+ */
+export function colorsEqual(a: RGB | null, b: RGB | null): boolean {
+  if (a === null && b === null) return true;
+  if (a === null || b === null) return false;
+  return a.r === b.r && a.g === b.g && a.b === b.b;
+}
+
+/**
+ * Check if two terminal cells are equal
+ */
+export function cellsEqual(a: TerminalCell, b: TerminalCell | undefined): boolean {
+  if (!b) return false;
+  return a.char === b.char &&
+         colorsEqual(a.fgColor, b.fgColor) &&
+         colorsEqual(a.bgColor, b.bgColor);
+}
+
 /**
  * Render a single pixel as a 2-character colored block
  */
@@ -460,6 +498,100 @@ export function downsampleGrid(grid: PixelGrid, factor: number): PixelGrid {
       }
     }
     result.push(row);
+  }
+
+  return result;
+}
+
+// ============================================
+// Cell Grid Render Functions (for cell-level diffing)
+// ============================================
+
+/**
+ * Render a pixel grid to a cell grid using normal mode (2 chars per pixel)
+ * Each pixel becomes a cell with 2 spaces and a background color
+ */
+export function renderNormalGridCells(grid: PixelGrid): CellGrid {
+  const result: CellGrid = [];
+
+  for (const row of grid) {
+    const cellRow: TerminalCell[] = [];
+    for (const pixel of row) {
+      cellRow.push({
+        char: PIXEL_CHARS,
+        fgColor: null,
+        bgColor: pixel ?? DEFAULT_BG,
+      });
+    }
+    result.push(cellRow);
+  }
+
+  return result;
+}
+
+/**
+ * Render a pixel grid to a cell grid using half-block mode
+ * Each cell represents 2 vertical pixels (1 char width)
+ */
+export function renderHalfBlockGridCells(grid: PixelGrid): CellGrid {
+  const result: CellGrid = [];
+
+  for (let y = 0; y < grid.length; y += 2) {
+    const topRow = grid[y] ?? [];
+    const bottomRow = grid[y + 1] ?? [];
+    const cellRow: TerminalCell[] = [];
+
+    const len = Math.max(topRow.length, bottomRow.length);
+    for (let i = 0; i < len; i++) {
+      const topPixel = topRow[i] ?? null;
+      const bottomPixel = bottomRow[i] ?? null;
+
+      cellRow.push({
+        char: HALF_BLOCK_TOP,
+        fgColor: topPixel ?? DEFAULT_BG,
+        bgColor: bottomPixel ?? DEFAULT_BG,
+      });
+    }
+    result.push(cellRow);
+  }
+
+  return result;
+}
+
+/**
+ * Render a pixel grid to a cell grid using braille mode
+ * Each cell represents 2×4 pixels (8 subpixels per character)
+ */
+export function renderBrailleGridCells(grid: PixelGrid): CellGrid {
+  const result: CellGrid = [];
+  const height = grid.length;
+  const width = grid[0]?.length ?? 0;
+
+  // Process 4 rows at a time (Braille is 2×4)
+  for (let y = 0; y < height; y += 4) {
+    const cellRow: TerminalCell[] = [];
+
+    // Process 2 columns at a time
+    for (let x = 0; x < width; x += 2) {
+      // Extract 2×4 block
+      const block: Pixel[][] = [];
+      for (let dy = 0; dy < 4; dy++) {
+        const row: Pixel[] = [];
+        for (let dx = 0; dx < 2; dx++) {
+          row.push(grid[y + dy]?.[x + dx] ?? null);
+        }
+        block.push(row);
+      }
+
+      const { char, fg, bg } = renderBrailleChar(block);
+      cellRow.push({
+        char,
+        fgColor: fg,
+        bgColor: bg,
+      });
+    }
+
+    result.push(cellRow);
   }
 
   return result;

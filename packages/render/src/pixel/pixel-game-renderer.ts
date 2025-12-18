@@ -1,7 +1,20 @@
 import type { Duplex } from 'stream';
 import type { WorldDataProvider } from '@maldoror/protocol';
 import { ViewportRenderer, type ViewportConfig, type TextOverlay, type CameraMode } from './viewport-renderer.js';
-import { renderPixelRow, renderHalfBlockGrid, renderBrailleGrid, quantizeGrid } from './pixel-renderer.js';
+import {
+  renderPixelRow,
+  renderHalfBlockGrid,
+  renderBrailleGrid,
+  quantizeGrid,
+  renderNormalGridCells,
+  renderHalfBlockGridCells,
+  renderBrailleGridCells,
+  cellsEqual,
+  colorsEqual,
+  fgColor,
+  bgColor,
+  type CellGrid,
+} from './pixel-renderer.js';
 
 // Re-export for convenience
 export type { CameraMode } from './viewport-renderer.js';
@@ -70,6 +83,8 @@ export class PixelGameRenderer {
   private previousCameraX: number = -1;
   private previousCameraY: number = -1;
   private framesSkipped: number = 0;
+  // Cell-level diffing - store previous frame as cell grid
+  private previousCells: CellGrid = [];
 
   constructor(config: PixelGameRendererConfig) {
     this.stream = config.stream;
@@ -266,7 +281,7 @@ export class PixelGameRenderer {
     this.previousCameraY = this.playerY;
 
     // Skip expensive rendering if nothing changed
-    if (!cameraChanged && !this.forceRedraw && this.previousOutput.length > 0) {
+    if (!cameraChanged && !this.forceRedraw && this.previousCells.length > 0) {
       this.framesSkipped++;
       // Just update the stats bar (first line) to show we're still alive
       const statsBar = this.renderStatsBar();
@@ -296,38 +311,23 @@ export class PixelGameRenderer {
       quantizedBuffer = quantizeGrid(buffer, 5);
     }
 
-    // Convert to ANSI lines based on render mode
-    let viewportLines: string[];
+    // Convert to cell grid for cell-level diffing
+    let viewportCells: CellGrid;
     switch (this.renderMode) {
       case 'braille':
-        // Braille mode: 8 subpixels per character (2×4 dots) - HIGHEST RES
-        viewportLines = renderBrailleGrid(quantizedBuffer);
+        viewportCells = renderBrailleGridCells(quantizedBuffer);
         break;
       case 'halfblock':
-        // Half-block mode: 2 pixels per row, 1 char per pixel
-        viewportLines = renderHalfBlockGrid(quantizedBuffer);
+        viewportCells = renderHalfBlockGridCells(quantizedBuffer);
         break;
       case 'normal':
       default:
-        // Normal mode: 1 pixel per row, 2 chars per pixel
-        viewportLines = quantizedBuffer.map(row => renderPixelRow(row));
+        viewportCells = renderNormalGridCells(quantizedBuffer);
         break;
     }
 
-    // Pad viewport lines to fill screen width
-    const paddedLines = viewportLines.map(line => this.padLine(line));
-
-    // Add padding rows if needed to fill the screen
-    const availableRows = this.rows - STATS_BAR_HEIGHT;
-    while (paddedLines.length < availableRows) {
-      paddedLines.push(this.createPaddingLine());
-    }
-
-    // Combine stats bar + viewport
-    const lines = [statsBar, ...paddedLines];
-
-    // Output to stream with overlays
-    this.outputFrame(lines, overlays);
+    // Output using cell-level diffing for minimal bandwidth
+    this.outputFrameCellDiff(statsBar, viewportCells, overlays);
 
     // Track render time for next frame's display
     this.lastRenderTime = Date.now() - renderStart;
@@ -448,63 +448,150 @@ export class PixelGameRenderer {
   }
 
   /**
-   * Output frame to stream with minimal updates
+   * Output frame using cell-level diffing for minimal bandwidth
+   * Only emits ANSI codes for cells that changed since last frame
    */
-  private outputFrame(lines: string[], overlays: TextOverlay[] = []): void {
+  private outputFrameCellDiff(
+    statsBar: string,
+    viewportCells: CellGrid,
+    overlays: TextOverlay[] = []
+  ): void {
     let output = '';
-    const bgColor = `${ESC}[48;2;20;20;25m`;
 
-    // Performance: Only force full redraw when overlay count changes, not every frame with overlays
+    // Performance: Only force full redraw when overlay count changes or dimensions change
     const overlayCountChanged = overlays.length !== this.previousOverlayCount;
     this.previousOverlayCount = overlays.length;
 
-    if (this.forceRedraw || this.previousOutput.length !== lines.length || overlayCountChanged) {
-      // Full redraw - write every line from the top
-      output += `${ESC}[H`;  // Move to home
-      for (let y = 0; y < lines.length; y++) {
-        output += `${ESC}[${y + 1};1H`;  // Move to line y+1
-        output += lines[y] + `${ESC}[0m${bgColor}`;
-      }
-      // Clear any remaining lines below
-      output += `${ESC}[J`;  // Clear from cursor to end of screen
+    const needsFullRedraw = this.forceRedraw ||
+      this.previousCells.length !== viewportCells.length ||
+      overlayCountChanged;
+
+    // Always write stats bar (it changes every frame with FPS/bytes counter)
+    output += `${ESC}[1;1H${statsBar}${ESC}[0m`;
+
+    if (needsFullRedraw) {
+      // Full redraw - write all cells
+      output += this.renderAllCells(viewportCells);
       this.forceRedraw = false;
     } else {
-      // Incremental update - only redraw changed lines
-      for (let y = 0; y < lines.length; y++) {
-        if (lines[y] !== this.previousOutput[y]) {
-          output += `${ESC}[${y + 1};1H`;  // Move to line y+1
-          output += lines[y] + `${ESC}[0m`;
-        }
-      }
+      // Cell-level diff - only write changed cells
+      output += this.renderChangedCells(viewportCells);
     }
 
     // Render text overlays (usernames above players)
     for (const overlay of overlays) {
       const { row, col } = this.pixelToTerminal(overlay.pixelX, overlay.pixelY);
-
-      // Account for stats bar (+1) and 1-based terminal rows (+1)
       const terminalRow = row + STATS_BAR_HEIGHT + 1;
 
-      // Skip if out of bounds
       if (terminalRow < 1 || terminalRow > this.rows) continue;
 
-      // Center the text
-      const textLen = overlay.text.length + 2;  // +2 for padding spaces
+      const textLen = overlay.text.length + 2;
       const startCol = Math.max(1, col - Math.floor(textLen / 2) + 1);
 
-      // Build the overlay text with ANSI colors
-      const bg = `${ESC}[48;2;${overlay.bgColor.r};${overlay.bgColor.g};${overlay.bgColor.b}m`;
-      const fg = `${ESC}[38;2;${overlay.fgColor.r};${overlay.fgColor.g};${overlay.fgColor.b}m`;
-      const reset = `${ESC}[0m`;
+      const overlayBg = `${ESC}[48;2;${overlay.bgColor.r};${overlay.bgColor.g};${overlay.bgColor.b}m`;
+      const overlayFg = `${ESC}[38;2;${overlay.fgColor.r};${overlay.fgColor.g};${overlay.fgColor.b}m`;
 
-      output += `${ESC}[${terminalRow};${startCol}H${bg}${fg} ${overlay.text} ${reset}`;
+      output += `${ESC}[${terminalRow};${startCol}H${overlayBg}${overlayFg} ${overlay.text} ${ESC}[0m`;
     }
 
     if (output) {
       this.lastFrameBytes = Buffer.byteLength(output, 'utf8');
       this.stream.write(output);
     }
-    this.previousOutput = [...lines];
+
+    // Deep copy for next frame comparison
+    this.previousCells = viewportCells.map(row => row.map(cell => ({ ...cell })));
+  }
+
+  /**
+   * Render all cells (for full redraw)
+   */
+  private renderAllCells(cells: CellGrid): string {
+    let output = '';
+    let lastFg: { r: number; g: number; b: number } | null = null;
+    let lastBg: { r: number; g: number; b: number } | null = null;
+
+    for (let y = 0; y < cells.length; y++) {
+      const row = cells[y];
+      if (!row) continue;
+
+      // Move to start of viewport row (after stats bar)
+      output += `${ESC}[${y + STATS_BAR_HEIGHT + 1};1H`;
+
+      for (let x = 0; x < row.length; x++) {
+        const cell = row[x];
+        if (!cell) continue;
+
+        // Emit foreground color if changed
+        if (cell.fgColor && (!lastFg || !colorsEqual(cell.fgColor, lastFg))) {
+          output += fgColor(cell.fgColor);
+          lastFg = cell.fgColor;
+        }
+
+        // Emit background color if changed
+        if (cell.bgColor && (!lastBg || !colorsEqual(cell.bgColor, lastBg))) {
+          output += bgColor(cell.bgColor);
+          lastBg = cell.bgColor;
+        }
+
+        output += cell.char;
+      }
+    }
+
+    output += `${ESC}[0m`;
+    return output;
+  }
+
+  /**
+   * Render only changed cells (for incremental update)
+   */
+  private renderChangedCells(cells: CellGrid): string {
+    let output = '';
+    let lastX = -2;
+    let lastY = -1;
+    let lastFg: { r: number; g: number; b: number } | null = null;
+    let lastBg: { r: number; g: number; b: number } | null = null;
+
+    for (let y = 0; y < cells.length; y++) {
+      const row = cells[y];
+      const prevRow = this.previousCells[y];
+      if (!row) continue;
+
+      for (let x = 0; x < row.length; x++) {
+        const cell = row[x];
+        const prevCell = prevRow?.[x];
+
+        if (!cell || cellsEqual(cell, prevCell)) continue;
+
+        // Move cursor only if not contiguous with last cell
+        if (lastY !== y || lastX !== x - 1) {
+          // Account for multi-char cells in normal mode
+          const termCol = this.renderMode === 'normal' ? x * 2 + 1 : x + 1;
+          output += `${ESC}[${y + STATS_BAR_HEIGHT + 1};${termCol}H`;
+        }
+
+        // Emit foreground color if changed
+        if (cell.fgColor && (!lastFg || !colorsEqual(cell.fgColor, lastFg))) {
+          output += fgColor(cell.fgColor);
+          lastFg = cell.fgColor;
+        }
+
+        // Emit background color if changed
+        if (cell.bgColor && (!lastBg || !colorsEqual(cell.bgColor, lastBg))) {
+          output += bgColor(cell.bgColor);
+          lastBg = cell.bgColor;
+        }
+
+        output += cell.char;
+        lastX = x;
+        lastY = y;
+      }
+    }
+
+    if (output) {
+      output += `${ESC}[0m`;
+    }
+    return output;
   }
 
   /**
@@ -520,6 +607,7 @@ export class PixelGameRenderer {
   invalidate(): void {
     this.forceRedraw = true;
     this.previousOutput = [];
+    this.previousCells = [];
   }
 
   /**
