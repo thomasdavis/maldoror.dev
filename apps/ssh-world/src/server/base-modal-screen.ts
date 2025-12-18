@@ -167,11 +167,14 @@ export abstract class BaseModalScreen {
 
   /**
    * Clean up resources when closing the screen
+   * NOTE: Does NOT remove stream listeners - subclass must do that to avoid
+   * removing game session's listener
    */
   protected cleanup(): void {
     this.destroyed = true;
     this.stopSpinner();
-    this.stream.removeAllListeners('data');
+    // Don't removeAllListeners('data') here - it would remove game session's listener!
+    // Each subclass should remove only its own listener before calling cleanup()
     this.stream.write(
       this.ansi
         .exitAlternateScreen()

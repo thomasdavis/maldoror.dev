@@ -3,7 +3,7 @@ import { renderHalfBlockGrid, BG_PRIMARY } from '@maldoror/render';
 import { generateBuildingSprite, type ProviderConfig, type DirectionalBuildingSprite } from '@maldoror/ai';
 import { BaseModalScreen } from './base-modal-screen.js';
 
-const GENERATION_TIMEOUT = 120000; // 2 minutes
+const GENERATION_TIMEOUT = 1200000; // 20 minutes
 
 export interface BuildingScreenResult {
   action: 'confirm' | 'cancel';
@@ -39,12 +39,17 @@ export class BuildingScreen extends BaseModalScreen {
     this.progressTotal = 3;
   }
 
+  private dataListener: ((data: Buffer) => void) | null = null;
+  private resolvePromise: ((result: BuildingScreenResult) => void) | null = null;
+
   async run(): Promise<BuildingScreenResult> {
     this.enterScreen();
     this.render();
 
     return new Promise((resolve) => {
-      const onData = async (data: Buffer) => {
+      this.resolvePromise = resolve;
+
+      this.dataListener = async (data: Buffer) => {
         if (this.destroyed) return;
 
         // Skip escape sequences (arrow keys, etc)
@@ -54,17 +59,13 @@ export class BuildingScreen extends BaseModalScreen {
 
         // Handle Escape key (single ESC byte)
         if (data[0] === 0x1b && data.length === 1) {
-          this.cleanup();
-          this.stream.removeListener('data', onData);
-          resolve({ action: 'cancel' });
+          this.finish({ action: 'cancel' });
           return;
         }
 
         // Handle Ctrl+C
         if (data[0] === 0x03) {
-          this.cleanup();
-          this.stream.removeListener('data', onData);
-          resolve({ action: 'cancel' });
+          this.finish({ action: 'cancel' });
           return;
         }
 
@@ -94,32 +95,40 @@ export class BuildingScreen extends BaseModalScreen {
           if (byte === 0x0d || byte === 0x0a) {
             // Enter - confirm
             console.log('[BUILDING] Confirming building, prompt:', this.prompt);
-            this.cleanup();
-            this.stream.removeListener('data', onData);
-            resolve({
+            this.finish({
               action: 'confirm',
               sprite: this.sprite!,
               prompt: this.prompt,
             });
             return;
           }
-        } else if (this.state === 'error') {
-          if (byte === 0x72 || byte === 0x52) {
-            // 'r' or 'R' - retry
-            this.state = 'input';
-            this.errorMessage = '';
-            this.render();
-          }
         }
+        // No retry on error - ESC/Ctrl+C already handled above for cancel
       };
 
-      this.stream.on('data', onData);
+      this.stream.on('data', this.dataListener);
     });
+  }
+
+  /**
+   * Clean finish - remove only our listener and resolve
+   */
+  private finish(result: BuildingScreenResult): void {
+    if (this.dataListener) {
+      this.stream.removeListener('data', this.dataListener);
+      this.dataListener = null;
+    }
+    this.cleanup();
+    this.resolvePromise?.(result);
+    this.resolvePromise = null;
   }
 
   private async startGeneration(): Promise<void> {
     if (this.isGenerating) return;
     this.isGenerating = true;
+
+    console.log('[BUILDING] Starting generation for prompt:', this.prompt);
+    const startTime = Date.now();
 
     this.state = 'generating';
     this.startSpinner();
@@ -137,6 +146,8 @@ export class BuildingScreen extends BaseModalScreen {
           apiKey: this.providerConfig.apiKey,
           username: this.username,
           onProgress: (step, current, total) => {
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            console.log(`[BUILDING] Progress [${elapsed}s]: ${step} (${current}/${total})`);
             this.progressStep = step;
             this.progressCurrent = current;
             this.progressTotal = total;
@@ -144,30 +155,36 @@ export class BuildingScreen extends BaseModalScreen {
           },
         }),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Generation timed out after 2 minutes')), GENERATION_TIMEOUT)
+          setTimeout(() => reject(new Error('Generation timed out after 20 minutes')), GENERATION_TIMEOUT)
         ),
       ]);
+
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
 
       if (result.success && result.sprite) {
         this.sprite = result.sprite;
         this.state = 'preview';
-        console.log('[BUILDING] Generation complete, state set to preview');
+        console.log(`[BUILDING] Generation complete in ${elapsed}s, state set to preview`);
+        this.stopSpinner();
+        this.isGenerating = false;
+        this.render();
       } else {
-        this.errorMessage = result.error || 'Unknown error occurred';
-        this.state = 'error';
-        console.log('[BUILDING] Generation failed:', this.errorMessage);
+        const errorMsg = result.error || 'Unknown error occurred';
+        console.log(`[BUILDING] Generation failed after ${elapsed}s:`, errorMsg);
+        this.stopSpinner();
+        this.isGenerating = false;
+        // Auto-cancel on error - return to game
+        this.finish({ action: 'cancel' });
       }
     } catch (error) {
-      this.errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      this.state = 'error';
-      console.log('[BUILDING] Generation exception:', this.errorMessage);
-    } finally {
-      // Always stop spinner and reset generation flag
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      console.log(`[BUILDING] Generation exception after ${elapsed}s:`, errorMsg);
       this.stopSpinner();
       this.isGenerating = false;
+      // Auto-cancel on error - return to game
+      this.finish({ action: 'cancel' });
     }
-
-    this.render();
   }
 
   protected renderSpinnerOnly(): void {
