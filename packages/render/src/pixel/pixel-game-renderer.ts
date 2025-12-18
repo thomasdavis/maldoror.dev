@@ -16,6 +16,7 @@ import {
   bgColor,
   type CellGrid,
 } from './pixel-renderer.js';
+import { BG_PRIMARY, BG_TERTIARY, fg, bg, ACCENT_CYAN, ACCENT_GOLD, TEXT_SECONDARY, BORDER_DIM, RESET } from '../brand.js';
 
 // Re-export for convenience
 export type { CameraMode } from './viewport-renderer.js';
@@ -224,25 +225,40 @@ export class PixelGameRenderer {
 
   /**
    * Initialize terminal (alternate screen, hide cursor)
+   * IMPORTANT: Always uses brand dark background - no system theme override
    */
   initialize(): void {
     if (this.initialized) return;
     this.initialized = true;
 
-    // Dark background color for the whole screen
-    const bgColor = `${ESC}[48;2;20;20;25m`;
+    // Brand dark background - ALWAYS enforced
+    const brandBg = bg(BG_PRIMARY);
 
     const init = [
       `${ESC}[?1049h`,      // Enter alternate screen
       `${ESC}[?25l`,         // Hide cursor
       `${ESC}[?7l`,          // Disable line wrap
-      bgColor,               // Set dark background
+      brandBg,               // Set brand dark background
       `${ESC}[2J`,           // Clear screen (with dark bg)
       `${ESC}[H`,            // Move to home
     ].join('');
 
     this.stream.write(init);
+
+    // Fill entire screen with brand background to prevent any light bleed
+    this.fillScreenBackground();
     this.forceRedraw = true;
+  }
+
+  /**
+   * Fill entire screen with brand dark background
+   * Prevents any system theme from bleeding through
+   */
+  private fillScreenBackground(): void {
+    const brandBg = bg(BG_PRIMARY);
+    for (let row = 1; row <= this.rows; row++) {
+      this.stream.write(`${ESC}[${row};1H${brandBg}${' '.repeat(this.cols)}`);
+    }
   }
 
   /**
@@ -439,36 +455,37 @@ export class PixelGameRenderer {
     const paddingNeeded = this.cols - viewportCharWidth;
 
     if (paddingNeeded > 0) {
-      return line + `${ESC}[48;2;20;20;25m` + ' '.repeat(paddingNeeded) + `${ESC}[0m`;
+      return line + bg(BG_PRIMARY) + ' '.repeat(paddingNeeded) + RESET;
     }
     return line;
   }
 
   /**
-   * Create a full-width padding line
+   * Create a full-width padding line with brand background
    */
   private createPaddingLine(): string {
-    return `${ESC}[48;2;20;20;25m` + ' '.repeat(this.cols) + `${ESC}[0m`;
+    return bg(BG_PRIMARY) + ' '.repeat(this.cols) + RESET;
   }
 
   /**
    * Render the stats bar showing username, coordinates, zoom, render mode, camera mode, rotation, and debug info
    * Returns 2 lines: main header bar + separator line
+   * Uses brand colors - always dark
    */
   private renderStatsBar(): string {
     const tileSize = this.getCurrentTileSize();
     const { availableCols, availableRows } = this.getViewportArea();
     const { widthTiles, heightTiles } = this.calculateViewportTiles(availableCols, availableRows);
 
-    // Colors
-    const bgHeader = `${ESC}[48;2;25;25;35m`;  // Dark purple-gray background
-    const bgSep = `${ESC}[48;2;45;40;55m`;     // Slightly lighter separator
-    const fgName = `${ESC}[38;2;120;220;255m`; // Bright cyan for username
-    const fgLabel = `${ESC}[38;2;140;140;160m`; // Dim for labels
-    const fgValue = `${ESC}[38;2;255;200;100m`; // Gold for values
+    // Brand colors - always dark, high contrast
+    const bgHeader = bg(BG_TERTIARY);
+    const bgSep = `${ESC}[48;2;35;30;45m`;     // Slightly lighter separator
+    const fgName = fg(ACCENT_CYAN);
+    const fgLabel = fg(TEXT_SECONDARY);
+    const fgValue = fg(ACCENT_GOLD);
     const fgCoord = `${ESC}[38;2;160;180;200m`; // Blue-gray for coordinates
-    const fgSep = `${ESC}[38;2;60;55;70m`;     // Dim separator color
-    const reset = `${ESC}[0m`;
+    const fgSep = fg(BORDER_DIM);
+    const reset = RESET;
 
     // Build header content with generous padding
     const leftSection = `  ${fgName}${this.username}${fgLabel}`;
@@ -875,7 +892,7 @@ export class PixelGameRenderer {
    */
   private generateFrameOutput(lines: string[], overlays: TextOverlay[] = []): string {
     let output = '';
-    const bgColor = `${ESC}[48;2;20;20;25m`;
+    const bgColorAnsi = bg(BG_PRIMARY);
 
     // Performance: Only force full redraw when overlay count changes, not every frame with overlays
     const overlayCountChanged = overlays.length !== this.previousOverlayCount;
@@ -886,7 +903,7 @@ export class PixelGameRenderer {
       output += `${ESC}[H`;  // Move to home
       for (let y = 0; y < lines.length; y++) {
         output += `${ESC}[${y + 1};1H`;  // Move to line y+1
-        output += lines[y] + `${ESC}[0m${bgColor}`;
+        output += lines[y] + `${ESC}[0m${bgColorAnsi}`;
       }
       // Clear any remaining lines below
       output += `${ESC}[J`;  // Clear from cursor to end of screen

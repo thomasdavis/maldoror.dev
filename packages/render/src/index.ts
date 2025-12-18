@@ -1,6 +1,9 @@
 // Component system (new)
 export * from './components/index.js';
 
+// Brand colors (always dark theme)
+export * from './brand.js';
+
 // ANSI utilities
 export { ANSIBuilder } from './ansi/builder.js';
 export * from './ansi/codes.js';

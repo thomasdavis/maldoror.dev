@@ -1,5 +1,5 @@
 import type { Duplex } from 'stream';
-import { renderHalfBlockGrid } from '@maldoror/render';
+import { renderHalfBlockGrid, BG_PRIMARY } from '@maldoror/render';
 import { generateBuildingSprite, type ProviderConfig, type DirectionalBuildingSprite } from '@maldoror/ai';
 import { BaseModalScreen } from './base-modal-screen.js';
 
@@ -184,7 +184,7 @@ export class BuildingScreen extends BaseModalScreen {
   private render(): void {
     this.stream.write(
       this.ansi
-        .setBackground({ type: 'rgb', value: [20, 20, 25] })
+        .setBackground({ type: 'rgb', value: [BG_PRIMARY.r, BG_PRIMARY.g, BG_PRIMARY.b] })
         .clearScreen()
         .moveTo(0, 0)
         .build()
@@ -331,7 +331,7 @@ export class BuildingScreen extends BaseModalScreen {
     const padded = displayText.padEnd(58, ' ');
 
     this.stream.write(
-      `\x1b[8;${x + 3}H\x1b[48;2;20;20;25m\x1b[38;2;255;255;255m${padded}\x1b[8;${x + 3 + displayText.length}H`
+      `\x1b[8;${x + 3}H\x1b[48;2;${BG_PRIMARY.r};${BG_PRIMARY.g};${BG_PRIMARY.b}m\x1b[38;2;255;255;255m${padded}\x1b[8;${x + 3 + displayText.length}H`
     );
   }
 

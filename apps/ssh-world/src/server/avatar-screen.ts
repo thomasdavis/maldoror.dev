@@ -1,6 +1,6 @@
 import type { Duplex } from 'stream';
 import type { Sprite } from '@maldoror/protocol';
-import { renderHalfBlockGrid } from '@maldoror/render';
+import { renderHalfBlockGrid, BG_PRIMARY } from '@maldoror/render';
 import { generateImageSprite, type ProviderConfig } from '@maldoror/ai';
 import { BaseModalScreen } from './base-modal-screen.js';
 
@@ -185,10 +185,11 @@ export class AvatarScreen extends BaseModalScreen {
   }
 
   private render(): void {
-    // Clear and redraw with dark background
+    // Clear and redraw with brand dark background
+    // IMPORTANT: Enforces Maldoror dark theme - no system override
     this.stream.write(
       this.ansi
-        .setBackground({ type: 'rgb', value: [20, 20, 25] })
+        .setBackground({ type: 'rgb', value: [BG_PRIMARY.r, BG_PRIMARY.g, BG_PRIMARY.b] })
         .clearScreen()
         .moveTo(0, 0)
         .build()
@@ -325,8 +326,9 @@ export class AvatarScreen extends BaseModalScreen {
     const padded = displayText.padEnd(50, ' ');
 
     // Single write: move to position, set colors, write padded text, position cursor
+    // Uses brand dark background
     this.stream.write(
-      `\x1b[9;${x + 3}H\x1b[48;2;20;20;25m\x1b[38;2;255;255;255m${padded}\x1b[9;${x + 3 + displayText.length}H`
+      `\x1b[9;${x + 3}H\x1b[48;2;${BG_PRIMARY.r};${BG_PRIMARY.g};${BG_PRIMARY.b}m\x1b[38;2;255;255;255m${padded}\x1b[9;${x + 3 + displayText.length}H`
     );
   }
 

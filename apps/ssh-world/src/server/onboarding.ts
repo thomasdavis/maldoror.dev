@@ -1,5 +1,5 @@
 import type { Duplex } from 'stream';
-import { ANSIBuilder } from '@maldoror/render';
+import { ANSIBuilder, BG_PRIMARY, CRIMSON_BRIGHT, CRIMSON_MID, ACCENT_GREEN, ACCENT_RED, fg, bg } from '@maldoror/render';
 import { db, schema } from '@maldoror/db';
 import { eq } from 'drizzle-orm';
 import { USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH, USERNAME_PATTERN } from '@maldoror/protocol';
@@ -24,15 +24,29 @@ export class OnboardingFlow {
     this.ansi = new ANSIBuilder();
   }
 
+  /**
+   * Fill entire screen with brand dark background
+   * IMPORTANT: Prevents any system theme from bleeding through
+   */
+  private fillBackground(): void {
+    const bgAnsi = bg(BG_PRIMARY);
+    for (let y = 0; y < 40; y++) {
+      this.stream.write(`\x1b[${y + 1};1H${bgAnsi}${' '.repeat(100)}`);
+    }
+  }
+
   async run(): Promise<OnboardingResult | null> {
-    // Enter alternate screen
+    // Enter alternate screen with brand dark background
+    // IMPORTANT: Enforces Maldoror dark theme - no system override
     this.stream.write(
       this.ansi
         .enterAlternateScreen()
         .hideCursor()
+        .setBackground({ type: 'rgb', value: [BG_PRIMARY.r, BG_PRIMARY.g, BG_PRIMARY.b] })
         .clearScreen()
         .build()
     );
+    this.fillBackground();
 
     try {
       // Show welcome screen
@@ -55,40 +69,35 @@ export class OnboardingFlow {
   }
 
   private async showWelcome(): Promise<void> {
+    // Use brand crimson colors for the logo
+    const logoColor = fg(CRIMSON_BRIGHT);
+    const borderColor = fg(CRIMSON_MID);
+    const reset = '\x1b[0m';
+
     const lines = [
       '',
-      '    ╔══════════════════════════════════════════════════════════╗',
-      '    ║                                                          ║',
-      '    ║     ███╗   ███╗ █████╗ ██╗     ██████╗  ██████╗ ██████╗  ║',
-      '    ║     ████╗ ████║██╔══██╗██║     ██╔══██╗██╔═══██╗██╔══██╗ ║',
-      '    ║     ██╔████╔██║███████║██║     ██║  ██║██║   ██║██████╔╝ ║',
-      '    ║     ██║╚██╔╝██║██╔══██║██║     ██║  ██║██║   ██║██╔══██╗ ║',
-      '    ║     ██║ ╚═╝ ██║██║  ██║███████╗██████╔╝╚██████╔╝██║  ██║ ║',
-      '    ║     ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝ ║',
-      '    ║                                                          ║',
-      '    ║              Welcome to the Abyss, Wanderer              ║',
-      '    ║                                                          ║',
-      '    ╚══════════════════════════════════════════════════════════╝',
+      `${borderColor}    ╔══════════════════════════════════════════════════════════╗${reset}`,
+      `${borderColor}    ║${reset}                                                          ${borderColor}║${reset}`,
+      `${borderColor}    ║${reset}     ${logoColor}███╗   ███╗ █████╗ ██╗     ██████╗  ██████╗ ██████╗ ${reset} ${borderColor}║${reset}`,
+      `${borderColor}    ║${reset}     ${logoColor}████╗ ████║██╔══██╗██║     ██╔══██╗██╔═══██╗██╔══██╗${reset} ${borderColor}║${reset}`,
+      `${borderColor}    ║${reset}     ${logoColor}██╔████╔██║███████║██║     ██║  ██║██║   ██║██████╔╝${reset} ${borderColor}║${reset}`,
+      `${borderColor}    ║${reset}     ${logoColor}██║╚██╔╝██║██╔══██║██║     ██║  ██║██║   ██║██╔══██╗${reset} ${borderColor}║${reset}`,
+      `${borderColor}    ║${reset}     ${logoColor}██║ ╚═╝ ██║██║  ██║███████╗██████╔╝╚██████╔╝██║  ██║${reset} ${borderColor}║${reset}`,
+      `${borderColor}    ║${reset}     ${logoColor}╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝${reset} ${borderColor}║${reset}`,
+      `${borderColor}    ║${reset}                                                          ${borderColor}║${reset}`,
+      `${borderColor}    ║${reset}              Welcome to the Abyss, Wanderer              ${borderColor}║${reset}`,
+      `${borderColor}    ║${reset}                                                          ${borderColor}║${reset}`,
+      `${borderColor}    ╚══════════════════════════════════════════════════════════╝${reset}`,
       '',
       '',
       '    Your SSH key is not recognized. You appear to be new here.',
       '',
     ];
 
-    this.stream.write(
-      this.ansi
-        .moveTo(0, 0)
-        .setForeground({ type: 'rgb', value: [180, 100, 255] })
-        .build()
-    );
-
+    // Write with brand background
+    const bgAnsi = bg(BG_PRIMARY);
     for (let i = 0; i < lines.length; i++) {
-      this.stream.write(
-        this.ansi
-          .moveTo(0, i)
-          .write(lines[i] || '')
-          .build()
-      );
+      this.stream.write(`\x1b[${i + 1};1H${bgAnsi}${lines[i] || ''}`);
     }
 
     this.stream.write(this.ansi.resetAttributes().build());
@@ -98,11 +107,11 @@ export class OnboardingFlow {
     const promptY = 18;
 
     while (true) {
-      // Show prompt
+      // Show prompt with brand colors
       this.stream.write(
         this.ansi
           .moveTo(4, promptY)
-          .setForeground({ type: 'rgb', value: [100, 255, 100] })
+          .setForeground({ type: 'rgb', value: [ACCENT_GREEN.r, ACCENT_GREEN.g, ACCENT_GREEN.b] })
           .write('Choose a name: ')
           .setForeground({ type: 'rgb', value: [255, 255, 255] })
           .showCursor()
@@ -130,11 +139,11 @@ export class OnboardingFlow {
       // Validate
       const validation = this.validateUsername(input);
       if (!validation.valid) {
-        // Show error
+        // Show error with brand colors
         this.stream.write(
           this.ansi
             .moveTo(4, promptY + 2)
-            .setForeground({ type: 'rgb', value: [255, 100, 100] })
+            .setForeground({ type: 'rgb', value: [ACCENT_RED.r, ACCENT_RED.g, ACCENT_RED.b] })
             .write(' '.repeat(60))
             .moveTo(4, promptY + 2)
             .write(`Error: ${validation.error}`)
@@ -153,7 +162,7 @@ export class OnboardingFlow {
         this.stream.write(
           this.ansi
             .moveTo(4, promptY + 2)
-            .setForeground({ type: 'rgb', value: [255, 100, 100] })
+            .setForeground({ type: 'rgb', value: [ACCENT_RED.r, ACCENT_RED.g, ACCENT_RED.b] })
             .write(' '.repeat(60))
             .moveTo(4, promptY + 2)
             .write('Error: That name is already taken.')

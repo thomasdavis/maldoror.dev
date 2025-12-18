@@ -1,5 +1,5 @@
 import type { Duplex } from 'stream';
-import { ANSIBuilder } from '@maldoror/render';
+import { ANSIBuilder, BG_PRIMARY } from '@maldoror/render';
 
 const SPINNER_FRAMES = ['◐', '◓', '◑', '◒'];
 const SPINNER_INTERVAL = 200;
@@ -40,12 +40,13 @@ export abstract class BaseModalScreen {
   }
 
   /**
-   * Fill the background with a dark color
+   * Fill the background with brand dark color
+   * IMPORTANT: Enforces Maldoror dark theme - no system override possible
    */
   protected fillBackground(): void {
     this.stream.write(
       this.ansi
-        .setBackground({ type: 'rgb', value: [20, 20, 25] })
+        .setBackground({ type: 'rgb', value: [BG_PRIMARY.r, BG_PRIMARY.g, BG_PRIMARY.b] })
         .build()
     );
     for (let y = 0; y < 30; y++) {
@@ -182,13 +183,14 @@ export abstract class BaseModalScreen {
 
   /**
    * Enter the modal screen (alternate buffer, hide cursor, dark background)
+   * IMPORTANT: Enforces Maldoror dark theme - no system override possible
    */
   protected enterScreen(): void {
     this.stream.write(
       this.ansi
         .enterAlternateScreen()
         .hideCursor()
-        .setBackground({ type: 'rgb', value: [20, 20, 25] })
+        .setBackground({ type: 'rgb', value: [BG_PRIMARY.r, BG_PRIMARY.g, BG_PRIMARY.b] })
         .clearScreen()
         .build()
     );

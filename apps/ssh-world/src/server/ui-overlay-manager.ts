@@ -1,6 +1,10 @@
+import { BG_MODAL, BORDER_VISIBLE, ACCENT_GOLD, TEXT_PRIMARY, ACCENT_GREEN, ACCENT_CYAN, TEXT_SECONDARY, BORDER_ACCENT } from '@maldoror/render';
+
 /**
  * UIOverlayManager - Handles generation of modal overlays for the game UI
  * Extracted from GameSession to reduce file size and improve maintainability
+ *
+ * IMPORTANT: All overlays use Maldoror brand dark colors - no system override
  */
 
 interface PlayerInfo {
@@ -40,12 +44,12 @@ export class UIOverlayManager {
     const startX = Math.floor((this.cols - overlayWidth) / 2);
     const startY = Math.floor((this.rows - overlayHeight) / 2);
 
-    // Semi-transparent background using dark color
-    const bgColor = `${ESC}[48;2;20;20;35m`;
-    const borderColor = `${ESC}[38;2;100;100;150m`;
-    const headerColor = `${ESC}[38;2;255;200;100m`;
-    const textColor = `${ESC}[38;2;200;200;200m`;
-    const selfColor = `${ESC}[38;2;100;255;150m`;
+    // Brand dark colors - Maldoror theme, no system override
+    const bgColor = `${ESC}[48;2;${BG_MODAL.r};${BG_MODAL.g};${BG_MODAL.b}m`;
+    const borderColor = `${ESC}[38;2;${BORDER_VISIBLE.r};${BORDER_VISIBLE.g};${BORDER_VISIBLE.b}m`;
+    const headerColor = `${ESC}[38;2;${ACCENT_GOLD.r};${ACCENT_GOLD.g};${ACCENT_GOLD.b}m`;
+    const textColor = `${ESC}[38;2;${TEXT_PRIMARY.r};${TEXT_PRIMARY.g};${TEXT_PRIMARY.b}m`;
+    const selfColor = `${ESC}[38;2;${ACCENT_GREEN.r};${ACCENT_GREEN.g};${ACCENT_GREEN.b}m`;
     const reset = `${ESC}[0m`;
 
     let output = '';
@@ -110,11 +114,11 @@ export class UIOverlayManager {
     const startX = Math.floor((this.cols - overlayWidth) / 2);
     const startY = Math.floor((this.rows - overlayHeight) / 2);
 
-    // Colors
-    const bgColor = `${ESC}[48;2;20;20;35m`;
-    const borderColor = `${ESC}[38;2;100;100;150m`;
-    const textColor = `${ESC}[38;2;255;200;100m`;
-    const subTextColor = `${ESC}[38;2;150;150;170m`;
+    // Brand dark colors - Maldoror theme, no system override
+    const bgColor = `${ESC}[48;2;${BG_MODAL.r};${BG_MODAL.g};${BG_MODAL.b}m`;
+    const borderColor = `${ESC}[38;2;${BORDER_VISIBLE.r};${BORDER_VISIBLE.g};${BORDER_VISIBLE.b}m`;
+    const textColor = `${ESC}[38;2;${ACCENT_GOLD.r};${ACCENT_GOLD.g};${ACCENT_GOLD.b}m`;
+    const subTextColor = `${ESC}[38;2;${TEXT_SECONDARY.r};${TEXT_SECONDARY.g};${TEXT_SECONDARY.b}m`;
     const reset = `${ESC}[0m`;
 
     // Spinner frames
@@ -181,13 +185,13 @@ export class UIOverlayManager {
     const startX = Math.floor((this.cols - overlayWidth) / 2);
     const startY = Math.floor((this.rows - overlayHeight) / 2);
 
-    // Colors
-    const bgColor = `${ESC}[48;2;25;25;35m`;
-    const borderColor = `${ESC}[38;2;100;120;180m`;
-    const headerColor = `${ESC}[38;2;255;220;100m`;
-    const keyColor = `${ESC}[38;2;120;200;255m`;
-    const descColor = `${ESC}[38;2;200;200;210m`;
-    const hintColor = `${ESC}[38;2;150;150;170m`;
+    // Brand dark colors - Maldoror theme, no system override
+    const bgColor = `${ESC}[48;2;${BG_MODAL.r};${BG_MODAL.g};${BG_MODAL.b}m`;
+    const borderColor = `${ESC}[38;2;${BORDER_ACCENT.r};${BORDER_ACCENT.g};${BORDER_ACCENT.b}m`;
+    const headerColor = `${ESC}[38;2;${ACCENT_GOLD.r};${ACCENT_GOLD.g};${ACCENT_GOLD.b}m`;
+    const keyColor = `${ESC}[38;2;${ACCENT_CYAN.r};${ACCENT_CYAN.g};${ACCENT_CYAN.b}m`;
+    const descColor = `${ESC}[38;2;${TEXT_PRIMARY.r};${TEXT_PRIMARY.g};${TEXT_PRIMARY.b}m`;
+    const hintColor = `${ESC}[38;2;${TEXT_SECONDARY.r};${TEXT_SECONDARY.g};${TEXT_SECONDARY.b}m`;
     const reset = `${ESC}[0m`;
 
     let output = '';
