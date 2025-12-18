@@ -30,14 +30,16 @@ function convertCompactToProtocolSprite(aiSprite: CompactPixelSprite): Sprite {
     return [frame, frame, frame, frame];
   };
 
+  // Note: AI interprets "left/right" as "viewed from left/right" rather than "facing left/right"
+  // So we swap left↔right to get the correct facing direction
   return {
     width: 16,
     height: 24,
     frames: {
       up: makeFrames(aiSprite.frames.up),
       down: makeFrames(aiSprite.frames.down),
-      left: makeFrames(aiSprite.frames.left),
-      right: makeFrames(aiSprite.frames.right),
+      left: makeFrames(aiSprite.frames.right),   // Swap: AI's "right" = facing left
+      right: makeFrames(aiSprite.frames.left),   // Swap: AI's "left" = facing right
     },
   };
 }

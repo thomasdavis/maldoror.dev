@@ -1,5 +1,7 @@
 export * from './users';
 export * from './avatars';
 export * from './buildings';
+export * from './building-tiles';
+export * from './sprite-frames';
 export * from './world';
 export * from './sessions';

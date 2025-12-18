@@ -1,3 +1,7 @@
+// Sentry must be imported first
+import './instrument.js';
+import * as Sentry from '@sentry/node';
+
 import 'dotenv/config';
 import { SSHServer } from './server/ssh-server.js';
 import { WorkerManager } from './server/worker-manager.js';
@@ -69,6 +73,7 @@ async function main() {
       console.log('=== Hot reload complete ===\n');
     } catch (error) {
       console.error('Hot reload failed:', error);
+      Sentry.captureException(error);
     }
   });
 
@@ -114,5 +119,6 @@ async function main() {
 
 main().catch((error) => {
   console.error('Fatal error:', error);
+  Sentry.captureException(error);
   process.exit(1);
 });

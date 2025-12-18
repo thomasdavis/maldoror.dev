@@ -39,5 +39,8 @@
     "@maldoror/tsconfig": "workspace:*",
     "turbo": "^2.3.0",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "sharp": "^0.34.5"
   }
 }

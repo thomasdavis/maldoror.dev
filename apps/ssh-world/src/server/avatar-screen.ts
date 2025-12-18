@@ -116,8 +116,10 @@ export class AvatarScreen {
             }
           }
         } else if (this.state === 'preview') {
+          console.log('[AVATAR] Preview state, received byte:', byte);
           if (byte === 0x0d || byte === 0x0a) {
             // Enter - confirm
+            console.log('[AVATAR] Confirming sprite, prompt:', this.prompt);
             this.cleanup();
             this.stream.removeListener('data', onData);
             resolve({
@@ -173,17 +175,21 @@ export class AvatarScreen {
       if (result.success && result.sprite) {
         this.sprite = result.sprite;
         this.state = 'preview';
+        console.log('[AVATAR] Generation complete, state set to preview');
       } else {
         this.errorMessage = result.error || 'Unknown error occurred';
         this.state = 'error';
+        console.log('[AVATAR] Generation failed, state set to error:', this.errorMessage);
       }
     } catch (error) {
       this.stopSpinner();
       this.isGenerating = false;
       this.errorMessage = error instanceof Error ? error.message : 'Unknown error';
       this.state = 'error';
+      console.log('[AVATAR] Generation exception, state set to error:', this.errorMessage);
     }
 
+    console.log('[AVATAR] Calling render() with state:', this.state);
     this.render();
   }
 

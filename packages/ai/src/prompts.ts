@@ -65,7 +65,11 @@ LAYOUT (16 wide x 24 tall):
 - Rows 7-15: Torso/arms
 - Rows 16-23: Legs/feet
 
-Each direction shows the character from that view (down=front, up=back, left/right=side).`;
+Direction meanings:
+- down = front view (character faces toward viewer)
+- up = back view (character faces away from viewer)
+- left = character faces LEFT (viewer sees their right side)
+- right = character faces RIGHT (viewer sees their left side)`;
 
 /**
  * Build user prompt from description (legacy ASCII mode)

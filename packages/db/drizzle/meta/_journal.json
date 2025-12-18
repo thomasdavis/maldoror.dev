@@ -15,6 +15,13 @@
       "when": 1766010583272,
       "tag": "0001_clever_gamora",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1766012315667,
+      "tag": "0002_flawless_spacker_dave",
+      "breakpoints": true
     }
   ]
 }

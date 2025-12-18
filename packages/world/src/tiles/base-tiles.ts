@@ -8,15 +8,7 @@ function rgb(r: number, g: number, b: number): RGB {
   return { r, g, b };
 }
 
-/**
- * Seeded random for deterministic tile generation
- */
-function seededRandom(seed: number): () => number {
-  return () => {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    return seed / 0x7fffffff;
-  };
-}
+// seededRandom removed during perf testing
 
 /**
  * Downscale a pixel grid using nearest-neighbor sampling
@@ -61,14 +53,29 @@ function generateAnimationResolutions(frames: PixelGrid[]): Record<string, Pixel
 }
 
 /**
+ * Create a solid color tile at BASE_SIZE (256x256) - for perf testing
+ */
+function createSolidTile(color: RGB): PixelGrid {
+  const grid: PixelGrid = [];
+  for (let y = 0; y < BASE_SIZE; y++) {
+    const row: (RGB | null)[] = Array(BASE_SIZE).fill(color);
+    grid.push(row);
+  }
+  return grid;
+}
+
+/**
  * Create a deterministic varied tile at BASE_SIZE (256x256)
+ * DISABLED FOR PERF TESTING - using solid colors instead
  */
 function createSeededVariedTile(
-  seed: number,
+  _seed: number,
   baseColor: RGB,
-  variations: RGB[],
-  variationChance: number = 0.3
+  _variations: RGB[],
+  _variationChance: number = 0.3
 ): PixelGrid {
+  return createSolidTile(baseColor);
+  /* ORIGINAL COMPLEX VERSION:
   const rand = seededRandom(seed);
   const grid: PixelGrid = [];
   for (let y = 0; y < BASE_SIZE; y++) {
@@ -83,6 +90,7 @@ function createSeededVariedTile(
     grid.push(row);
   }
   return grid;
+  */
 }
 
 // ============================================
