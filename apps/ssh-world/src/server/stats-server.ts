@@ -15,12 +15,18 @@ interface WorldStats {
   server: {
     uptime_seconds: number;
     uptime_human: string;
-    memory_mb: number;
-    heap_used_mb: number;
-    heap_total_mb: number;
+    memory: {
+      rss_mb: number;
+      heap_used_mb: number;
+      heap_total_mb: number;
+      external_mb: number;
+      array_buffers_mb: number;
+    };
     active_sessions: number;
     node_version: string;
     started_at: string;
+    pid: number;
+    platform: string;
   };
   world: {
     seed: string;
@@ -182,12 +188,18 @@ export class StatsServer {
       server: {
         uptime_seconds: Math.floor(uptimeSeconds),
         uptime_human: this.formatUptime(uptimeSeconds),
-        memory_mb: Math.round(memUsage.rss / 1024 / 1024),
-        heap_used_mb: Math.round(memUsage.heapUsed / 1024 / 1024),
-        heap_total_mb: Math.round(memUsage.heapTotal / 1024 / 1024),
+        memory: {
+          rss_mb: Math.round(memUsage.rss / 1024 / 1024),
+          heap_used_mb: Math.round(memUsage.heapUsed / 1024 / 1024),
+          heap_total_mb: Math.round(memUsage.heapTotal / 1024 / 1024),
+          external_mb: Math.round(memUsage.external / 1024 / 1024),
+          array_buffers_mb: Math.round(memUsage.arrayBuffers / 1024 / 1024),
+        },
         active_sessions: this.config.getSessionCount(),
         node_version: process.version,
         started_at: this.config.startTime.toISOString(),
+        pid: process.pid,
+        platform: process.platform,
       },
       world: {
         seed: worldRecord?.seed?.toString() || 'unknown',

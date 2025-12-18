@@ -67,6 +67,8 @@ export class ViewportRenderer {
   private dataResolution: number;  // Resolution to fetch from pre-computed data
   // Performance: Cache scaled frames to avoid repeated scaling
   private scaledFrameCache: Map<string, PixelGrid> = new Map();
+  private scaledFrameCacheOrder: string[] = []; // LRU order tracking
+  private readonly MAX_CACHE_SIZE = 500; // Max cached frames to prevent memory explosion
   private lastCacheClearSize: number = 0;
 
   constructor(config: ViewportConfig) {
@@ -387,6 +389,7 @@ export class ViewportRenderer {
     // Clear cache if tile size changed
     if (this.lastCacheClearSize !== this.tileRenderSize) {
       this.scaledFrameCache.clear();
+      this.scaledFrameCacheOrder = [];
       this.lastCacheClearSize = this.tileRenderSize;
     }
 
@@ -398,9 +401,18 @@ export class ViewportRenderer {
         return cached;
       }
 
+      // Evict oldest entries if cache is full
+      while (this.scaledFrameCacheOrder.length >= this.MAX_CACHE_SIZE) {
+        const oldestKey = this.scaledFrameCacheOrder.shift();
+        if (oldestKey) {
+          this.scaledFrameCache.delete(oldestKey);
+        }
+      }
+
       // Scale and cache
       const result = this.scaleFrameUncached(frame, targetWidth, targetHeight);
       this.scaledFrameCache.set(cacheKey, result);
+      this.scaledFrameCacheOrder.push(cacheKey);
       return result;
     }
 

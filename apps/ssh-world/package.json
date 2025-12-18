@@ -18,6 +18,7 @@
     "@maldoror/render": "workspace:*",
     "@maldoror/world": "workspace:*",
     "@sentry/node": "^10.31.0",
+    "@sentry/profiling-node": "^10.31.0",
     "dotenv": "^16.4.0",
     "drizzle-orm": "catalog:",
     "sharp": "^0.34.5",

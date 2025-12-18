@@ -10,9 +10,10 @@ if (!connectionString) {
 
 const pool = new Pool({
   connectionString,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  max: 10,                      // Reduced from 20 to prevent connection exhaustion
+  idleTimeoutMillis: 30000,     // Close idle connections after 30s
+  connectionTimeoutMillis: 10000, // Increased from 2s - wait up to 10s for connection
+  statement_timeout: 30000,     // Kill queries running longer than 30s
 });
 
 export const db = drizzle(pool, { schema });
