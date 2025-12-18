@@ -134,7 +134,14 @@ export class SSHServer {
     });
 
     client.on('error', (err) => {
-      console.error('Client error:', err.message);
+      // Ignore ECONNRESET from HAProxy health checks (they connect and immediately close)
+      if (err.message === 'read ECONNRESET' && !didAttemptAuth) {
+        return; // Silently ignore health check disconnects
+      }
+      // Only log real errors from authenticated clients
+      if (didAttemptAuth) {
+        console.error('Client error:', err.message);
+      }
     });
 
     client.on('end', () => {
