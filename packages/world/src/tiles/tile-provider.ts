@@ -1,6 +1,7 @@
-import type { Tile, Sprite, PlayerVisualState, PixelGrid, RGB, WorldDataProvider, Pixel, DirectionFrames, BuildingSprite, BuildingTile, BuildingDirection } from '@maldoror/protocol';
+import type { Tile, Sprite, PlayerVisualState, PixelGrid, RGB, WorldDataProvider, Pixel, DirectionFrames, BuildingSprite, BuildingTile, BuildingDirection, NPCVisualState } from '@maldoror/protocol';
 import { CHUNK_SIZE_TILES, BASE_SIZE, RESOLUTIONS, isPositionInBuilding, getBuildingTileIndex } from '@maldoror/protocol';
 import { BASE_TILES, getTileById } from './base-tiles.js';
+import { getRoadTileVariant } from './road-tiles.js';
 import { SeededRandom, ValueNoise } from '../noise/noise.js';
 
 /**
@@ -107,9 +108,13 @@ export class TileProvider implements WorldDataProvider {
   private players: Map<string, PlayerVisualState> = new Map();
   private sprites: Map<string, Sprite> = new Map();
   private buildings: Map<string, BuildingData> = new Map(); // Building ID -> BuildingData
+  private npcs: Map<string, NPCVisualState> = new Map(); // NPC ID -> NPCVisualState
+  private npcSprites: Map<string, Sprite> = new Map(); // NPC ID -> Sprite
   private localPlayerId: string = '';
   private useEdgeBlending: boolean = false; // Disabled - just use base tiles
   private buildingsByChunk: Map<string, Set<string>> = new Map(); // Spatial hash for O(1) building lookups
+  private roads: Map<string, { x: number; y: number; placedBy: string | null }> = new Map(); // "x,y" -> road data
+  private roadsByChunk: Map<string, Set<string>> = new Map(); // Spatial hash for O(1) road lookups
 
   constructor(config: TileProviderConfig) {
     this.worldSeed = config.worldSeed;
@@ -322,6 +327,136 @@ export class TileProvider implements WorldDataProvider {
    */
   getPlayerSprite(userId: string): Sprite | null {
     return this.sprites.get(userId) ?? null;
+  }
+
+  // ==================== NPC Management ====================
+
+  /**
+   * Update NPC visual state
+   */
+  updateNPC(state: NPCVisualState): void {
+    this.npcs.set(state.npcId, state);
+  }
+
+  /**
+   * Remove NPC
+   */
+  removeNPC(npcId: string): void {
+    this.npcs.delete(npcId);
+    this.npcSprites.delete(npcId);
+  }
+
+  /**
+   * Get all NPCs
+   */
+  getNPCs(): NPCVisualState[] {
+    return Array.from(this.npcs.values());
+  }
+
+  /**
+   * Set NPC sprite
+   */
+  setNPCSprite(npcId: string, sprite: Sprite): void {
+    this.npcSprites.set(npcId, sprite);
+  }
+
+  /**
+   * Get NPC sprite
+   */
+  getNPCSprite(npcId: string): Sprite | null {
+    return this.npcSprites.get(npcId) ?? null;
+  }
+
+  /**
+   * Clear all NPCs
+   */
+  clearNPCs(): void {
+    this.npcs.clear();
+    this.npcSprites.clear();
+  }
+
+  // ==================== Road Management ====================
+
+  /**
+   * Get road key for position
+   */
+  private getRoadKey(x: number, y: number): string {
+    return `${x},${y}`;
+  }
+
+  /**
+   * Set a road at position
+   */
+  setRoad(x: number, y: number, placedBy: string | null): void {
+    const key = this.getRoadKey(x, y);
+    this.roads.set(key, { x, y, placedBy });
+
+    // Register in spatial hash
+    const chunkKey = this.getChunkKey(x, y);
+    let set = this.roadsByChunk.get(chunkKey);
+    if (!set) {
+      set = new Set();
+      this.roadsByChunk.set(chunkKey, set);
+    }
+    set.add(key);
+  }
+
+  /**
+   * Remove a road at position
+   */
+  removeRoad(x: number, y: number): void {
+    const key = this.getRoadKey(x, y);
+    this.roads.delete(key);
+
+    // Remove from spatial hash
+    const chunkKey = this.getChunkKey(x, y);
+    const set = this.roadsByChunk.get(chunkKey);
+    if (set) {
+      set.delete(key);
+      if (set.size === 0) {
+        this.roadsByChunk.delete(chunkKey);
+      }
+    }
+  }
+
+  /**
+   * Check if there's a road at position
+   */
+  hasRoadAt(x: number, y: number): boolean {
+    return this.roads.has(this.getRoadKey(x, y));
+  }
+
+  /**
+   * Get the appropriate road tile at a position based on neighbor connections
+   * Returns null if no road at position
+   */
+  getRoadTileAt(x: number, y: number): Tile | null {
+    if (!this.hasRoadAt(x, y)) {
+      return null;
+    }
+
+    // Check neighbors
+    const hasNorth = this.hasRoadAt(x, y - 1);
+    const hasSouth = this.hasRoadAt(x, y + 1);
+    const hasEast = this.hasRoadAt(x + 1, y);
+    const hasWest = this.hasRoadAt(x - 1, y);
+
+    return getRoadTileVariant(hasNorth, hasSouth, hasEast, hasWest);
+  }
+
+  /**
+   * Get all roads
+   */
+  getRoads(): Array<{ x: number; y: number; placedBy: string | null }> {
+    return Array.from(this.roads.values());
+  }
+
+  /**
+   * Clear all roads
+   */
+  clearRoads(): void {
+    this.roads.clear();
+    this.roadsByChunk.clear();
   }
 
   // ==================== Building Management ====================
@@ -600,6 +735,10 @@ export class TileProvider implements WorldDataProvider {
     this.sprites.clear();
     this.buildings.clear();
     this.buildingsByChunk.clear();
+    this.npcs.clear();
+    this.npcSprites.clear();
+    this.roads.clear();
+    this.roadsByChunk.clear();
     this.clearCache();
   }
 }

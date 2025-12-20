@@ -1,5 +1,9 @@
 import { ChunkCache, ChunkGenerator, SpatialIndex, GameLoop } from '@maldoror/world';
-import type { PlayerInput, Direction } from '@maldoror/protocol';
+import type { PlayerInput, Direction, NPCVisualState, Sprite } from '@maldoror/protocol';
+import { isPositionInBuilding } from '@maldoror/protocol';
+import { db, schema } from '@maldoror/db';
+import { NPCManager } from './npc-manager.js';
+import type { NPCCreateData } from '../utils/npc-storage.js';
 
 interface GameServerConfig {
   worldSeed: bigint;
@@ -29,6 +33,9 @@ interface ChatMessage {
 
 type ChatCallback = (message: ChatMessage) => void;
 type SpriteReloadCallback = (userId: string) => void;
+type NPCCreatedCallback = (npc: NPCVisualState) => void;
+type RoadPlacementCallback = (x: number, y: number, placedBy: string) => void;
+type RoadRemovalCallback = (x: number, y: number) => void;
 
 
 /**
@@ -40,12 +47,19 @@ export class GameServer {
   private chunkCache: ChunkCache;
   private spatialIndex: SpatialIndex;
   private gameLoop: GameLoop;
+  private npcManager: NPCManager;
   private players: Map<string, PlayerState> = new Map();
   private inputQueue: PlayerInput[] = [];
   private chatCallbacks: Map<string, ChatCallback> = new Map();
   private spriteReloadCallbacks: Map<string, SpriteReloadCallback> = new Map();
   private globalSpriteReloadCallback: SpriteReloadCallback | null = null;
+  private globalNPCCreatedCallback: NPCCreatedCallback | null = null;
   private recentChat: ChatMessage[] = [];
+  // Building positions for NPC collision: Map of "anchorX,anchorY" -> true
+  private buildingAnchors: Set<string> = new Set();
+  // Road callbacks for broadcasting to all players
+  private roadPlacementCallbacks: Map<string, RoadPlacementCallback> = new Map();
+  private roadRemovalCallbacks: Map<string, RoadRemovalCallback> = new Map();
 
   constructor(config: GameServerConfig) {
     this.config = config;
@@ -54,6 +68,7 @@ export class GameServer {
     this.chunkGenerator = new ChunkGenerator(config.worldSeed);
     this.chunkCache = new ChunkCache(this.chunkGenerator, config.chunkCacheSize);
     this.spatialIndex = new SpatialIndex();
+    this.npcManager = new NPCManager();
 
     // Initialize game loop
     this.gameLoop = new GameLoop({ tickRate: config.tickRate });
@@ -86,6 +101,10 @@ export class GameServer {
           }
         }
       }
+
+      // Tick NPCs with current player positions
+      const playerPositions = this.getPlayerPositions();
+      this.npcManager.tickAll(playerPositions);
     });
 
     // Post-tick: broadcast state (if needed)
@@ -350,6 +369,40 @@ export class GameServer {
     console.log(`Sprite reload broadcast for user: ${changedUserId}`);
   }
 
+  // ==================== Road Broadcasting ====================
+
+  /**
+   * Register road placement callback for a user
+   */
+  onRoadPlacement(userId: string, callback: RoadPlacementCallback): void {
+    this.roadPlacementCallbacks.set(userId, callback);
+  }
+
+  /**
+   * Register road removal callback for a user
+   */
+  onRoadRemoval(userId: string, callback: RoadRemovalCallback): void {
+    this.roadRemovalCallbacks.set(userId, callback);
+  }
+
+  /**
+   * Broadcast road placement to all online players
+   */
+  broadcastRoadPlacement(x: number, y: number, placedBy: string): void {
+    for (const [_userId, callback] of this.roadPlacementCallbacks) {
+      callback(x, y, placedBy);
+    }
+  }
+
+  /**
+   * Broadcast road removal to all online players
+   */
+  broadcastRoadRemoval(x: number, y: number): void {
+    for (const [_userId, callback] of this.roadRemovalCallbacks) {
+      callback(x, y);
+    }
+  }
+
   /**
    * Get chunk cache
    */
@@ -373,5 +426,160 @@ export class GameServer {
    */
   setGlobalSpriteReloadCallback(callback: SpriteReloadCallback): void {
     this.globalSpriteReloadCallback = callback;
+  }
+
+  // ==================== NPC Methods ====================
+
+  /**
+   * Get player positions for NPC AI calculations
+   */
+  private getPlayerPositions(): Array<{ userId: string; x: number; y: number }> {
+    const positions: Array<{ userId: string; x: number; y: number }> = [];
+    for (const player of this.players.values()) {
+      if (player.isOnline) {
+        positions.push({ userId: player.userId, x: player.x, y: player.y });
+      }
+    }
+    return positions;
+  }
+
+  /**
+   * Load NPCs from database on startup
+   */
+  async loadNPCs(): Promise<void> {
+    // First load building positions for collision checking
+    await this.loadBuildingPositions();
+
+    // Set up NPC collision checker
+    this.npcManager.setCollisionChecker((x: number, y: number) => {
+      return this.isPositionBlocked(x, y);
+    });
+
+    // Then load NPCs
+    await this.npcManager.loadFromDB();
+  }
+
+  /**
+   * Load all building positions from database for collision checking
+   */
+  private async loadBuildingPositions(): Promise<void> {
+    const buildings = await db.select({
+      anchorX: schema.buildings.anchorX,
+      anchorY: schema.buildings.anchorY,
+    }).from(schema.buildings);
+
+    this.buildingAnchors.clear();
+    for (const building of buildings) {
+      this.buildingAnchors.add(`${building.anchorX},${building.anchorY}`);
+    }
+
+    console.log(`[GameServer] Loaded ${this.buildingAnchors.size} building positions for collision`);
+  }
+
+  /**
+   * Add a new building to the collision cache
+   */
+  addBuildingToCollisionCache(anchorX: number, anchorY: number): void {
+    this.buildingAnchors.add(`${anchorX},${anchorY}`);
+  }
+
+  /**
+   * Check if a position is blocked by terrain or buildings
+   */
+  private isPositionBlocked(x: number, y: number): boolean {
+    // Check terrain walkability (use generator directly for walkable property)
+    const tile = this.chunkGenerator.getTileAt(x, y);
+    if (!tile.walkable) {
+      return true;
+    }
+
+    // Check buildings (3x3 areas around each anchor)
+    for (const anchorKey of this.buildingAnchors) {
+      const [anchorX, anchorY] = anchorKey.split(',').map(Number);
+      if (isPositionInBuilding(x, y, anchorX!, anchorY!)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Create a new NPC
+   */
+  async createNPC(data: NPCCreateData): Promise<NPCVisualState> {
+    const state = await this.npcManager.addNPC(data);
+
+    // Notify global callback for worker IPC
+    if (this.globalNPCCreatedCallback) {
+      this.globalNPCCreatedCallback({
+        npcId: state.npcId,
+        name: state.name,
+        x: state.x,
+        y: state.y,
+        direction: state.direction,
+        animationFrame: state.animationFrame,
+        isMoving: state.isMoving,
+      });
+    }
+
+    return {
+      npcId: state.npcId,
+      name: state.name,
+      x: state.x,
+      y: state.y,
+      direction: state.direction,
+      animationFrame: state.animationFrame,
+      isMoving: state.isMoving,
+    };
+  }
+
+  /**
+   * Get visible NPCs in viewport
+   */
+  getVisibleNPCs(
+    centerX: number,
+    centerY: number,
+    width: number,
+    height: number
+  ): NPCVisualState[] {
+    return this.npcManager.getVisibleNPCs(centerX, centerY, width, height);
+  }
+
+  /**
+   * Get all NPCs
+   */
+  getAllNPCs(): NPCVisualState[] {
+    return this.npcManager.getAllNPCs();
+  }
+
+  /**
+   * Get NPC sprite by ID
+   */
+  getNPCSprite(npcId: string): Sprite | null {
+    return this.npcManager.getNPCSprite(npcId);
+  }
+
+  /**
+   * Get NPC count
+   */
+  getNPCCount(): number {
+    return this.npcManager.getCount();
+  }
+
+  /**
+   * Set collision checker for NPCs
+   * Called to check if a position is blocked by terrain, buildings, or other entities
+   */
+  setNPCCollisionChecker(checker: (x: number, y: number) => boolean): void {
+    this.npcManager.setCollisionChecker(checker);
+  }
+
+  /**
+   * Set global NPC created callback (used by worker for IPC)
+   */
+  setGlobalNPCCreatedCallback(callback: NPCCreatedCallback): void {
+    this.globalNPCCreatedCallback = callback;
+    this.npcManager.onNPCCreated(callback);
   }
 }

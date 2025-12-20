@@ -66,10 +66,15 @@ export class InputRouter {
       { key: 't', action: 'start_chat' },
       { key: 'T', action: 'start_chat' },
       { key: 'Escape', action: 'open_menu' },
-      { key: 'r', action: 'regenerate_avatar' },
+      // Road placement (replaces regenerate_avatar)
+      { key: 'r', action: 'place_road' },
+      { key: 'R', shift: true, action: 'remove_road' },
       // Building placement
       { key: 'b', action: 'place_building' },
       { key: 'B', action: 'place_building' },
+      // NPC creation
+      { key: 'n', action: 'create_npc' },
+      { key: 'N', action: 'create_npc' },
       // Zoom controls
       { key: '+', action: 'zoom_in' },
       { key: '=', action: 'zoom_in' },

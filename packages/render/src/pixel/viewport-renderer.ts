@@ -1,6 +1,7 @@
 import type {
   PixelGrid,
   PlayerVisualState,
+  NPCVisualState,
   RGB,
   WorldDataProvider,
   Direction,
@@ -343,11 +344,14 @@ export class ViewportRenderer {
     // 1. Render terrain tiles with sub-pixel offset
     this.renderTiles(buffer, world, tick, origin);
 
-    // 2. Render building tiles on top of terrain (with transparency)
+    // 2. Render road tiles on top of terrain (with transparency)
+    this.renderRoads(buffer, world, origin);
+
+    // 3. Render building tiles on top of roads (with transparency)
     this.renderBuildings(buffer, world, origin);
 
-    // 3. Render players (sorted by Y for proper overlap)
-    this.renderPlayers(buffer, world, tick, origin);
+    // 4. Render players and NPCs together (sorted by Y for proper overlap)
+    this.renderEntities(buffer, world, tick, origin);
 
     return {
       buffer,
@@ -429,6 +433,75 @@ export class ViewportRenderer {
               if (pixel) {
                 buffer[bufferY]![bufferX] = pixel;
               }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Render road tiles on top of terrain (with transparency support and camera rotation)
+   */
+  private renderRoads(buffer: PixelGrid, world: WorldDataProvider, _origin: { x: number; y: number }): void {
+    // Skip if world doesn't support roads
+    if (!world.getRoadTileAt) return;
+
+    const resKey = String(this.dataResolution);
+
+    // Screen center in buffer coordinates
+    const screenCenterX = buffer[0]!.length / 2;
+    const screenCenterY = buffer.length / 2;
+
+    // Calculate the world bounds we need to sample (larger area to cover rotated viewport)
+    const viewportRadius = Math.max(buffer[0]!.length, buffer.length) / this.tileRenderSize + 2;
+    const cameraTileX = Math.floor(this.cameraCenterX / this.tileRenderSize);
+    const cameraTileY = Math.floor(this.cameraCenterY / this.tileRenderSize);
+
+    const startTileX = cameraTileX - Math.ceil(viewportRadius);
+    const startTileY = cameraTileY - Math.ceil(viewportRadius);
+    const endTileX = cameraTileX + Math.ceil(viewportRadius);
+    const endTileY = cameraTileY + Math.ceil(viewportRadius);
+
+    for (let worldTileY = startTileY; worldTileY <= endTileY; worldTileY++) {
+      for (let worldTileX = startTileX; worldTileX <= endTileX; worldTileX++) {
+        const roadTile = world.getRoadTileAt(worldTileX, worldTileY);
+        if (!roadTile) continue;
+
+        // Get the appropriate resolution
+        const tilePixels = roadTile.resolutions?.[resKey] ?? roadTile.pixels;
+
+        // Scale to exact tile render size if needed (with caching by position)
+        const frameId = `road:${worldTileX},${worldTileY}`;
+        const scaledPixels = this.scaleFrame(tilePixels, this.tileRenderSize, this.tileRenderSize, frameId);
+
+        // Calculate screen position with rotation
+        // World pixel position of tile center
+        const worldPixelX = (worldTileX + 0.5) * this.tileRenderSize;
+        const worldPixelY = (worldTileY + 0.5) * this.tileRenderSize;
+        // Transform to screen coordinates (offset from screen center)
+        const screenOffset = this.worldToScreen(worldPixelX, worldPixelY, this.cameraCenterX, this.cameraCenterY);
+        // Convert to buffer coordinates (top-left of tile)
+        // Use Math.floor for consistent alignment of adjacent tiles
+        const screenX = Math.floor(screenCenterX + screenOffset.x - this.tileRenderSize / 2);
+        const screenY = Math.floor(screenCenterY + screenOffset.y - this.tileRenderSize / 2);
+
+        // Copy road pixels to buffer (only non-transparent pixels)
+        for (let py = 0; py < scaledPixels.length; py++) {
+          const tileRow = scaledPixels[py];
+          if (!tileRow) continue;
+
+          const bufferY = screenY + py;
+          if (bufferY < 0 || bufferY >= buffer.length) continue;
+
+          for (let px = 0; px < tileRow.length; px++) {
+            const bufferX = screenX + px;
+            if (bufferX < 0 || bufferX >= buffer[bufferY]!.length) continue;
+
+            const pixel = tileRow[px];
+            if (pixel) {
+              // Only overwrite if pixel is not transparent
+              buffer[bufferY]![bufferX] = pixel;
             }
           }
         }
@@ -586,19 +659,31 @@ export class ViewportRenderer {
   }
 
   /**
-   * Render players to buffer with sub-pixel camera positioning and camera rotation
+   * Entity type union for combined player/NPC rendering
    */
-  private renderPlayers(buffer: PixelGrid, world: WorldDataProvider, _tick: number, _origin: { x: number; y: number }): void {
+  private isPlayer(entity: PlayerVisualState | NPCVisualState): entity is PlayerVisualState {
+    return 'userId' in entity;
+  }
+
+  /**
+   * Render players and NPCs to buffer with sub-pixel camera positioning and camera rotation
+   * Both entity types are combined and Y-sorted for proper overlap rendering
+   */
+  private renderEntities(buffer: PixelGrid, world: WorldDataProvider, _tick: number, _origin: { x: number; y: number }): void {
     const players = world.getPlayers();
+    const npcs = world.getNPCs?.() ?? [];
     const localId = world.getLocalPlayerId();
 
     // Screen center in buffer coordinates
     const screenCenterX = buffer[0]!.length / 2;
     const screenCenterY = buffer.length / 2;
 
+    // Combine players and NPCs into a single array for proper Y-sorting
+    const entities: (PlayerVisualState | NPCVisualState)[] = [...players, ...npcs];
+
     // Sort by Y position for proper layering (lower Y drawn first)
     // When camera is rotated, we need to sort by the rotated Y position
-    const sortedPlayers = [...players].sort((a, b) => {
+    const sortedEntities = entities.sort((a, b) => {
       const aWorld = { x: a.x * this.tileRenderSize, y: a.y * this.tileRenderSize };
       const bWorld = { x: b.x * this.tileRenderSize, y: b.y * this.tileRenderSize };
       const aScreen = this.worldToScreen(aWorld.x, aWorld.y, this.cameraCenterX, this.cameraCenterY);
@@ -606,11 +691,23 @@ export class ViewportRenderer {
       return aScreen.y - bScreen.y;
     });
 
-    for (const player of sortedPlayers) {
-      const sprite = world.getPlayerSprite(player.userId);
+    for (const entity of sortedEntities) {
+      const isPlayerEntity = this.isPlayer(entity);
+      const entityId = isPlayerEntity ? entity.userId : entity.npcId;
+      const entityName = isPlayerEntity ? entity.username : entity.name;
+
+      // Get sprite based on entity type
+      const sprite = isPlayerEntity
+        ? world.getPlayerSprite(entity.userId)
+        : world.getNPCSprite?.(entity.npcId);
+
       if (!sprite) {
         // Render placeholder if no sprite
-        this.renderPlaceholderPlayer(buffer, player, screenCenterX, screenCenterY);
+        if (isPlayerEntity) {
+          this.renderPlaceholderPlayer(buffer, entity, screenCenterX, screenCenterY);
+        } else {
+          this.renderPlaceholderNPC(buffer, entity, screenCenterX, screenCenterY);
+        }
         continue;
       }
 
@@ -618,7 +715,7 @@ export class ViewportRenderer {
       const resKey = String(this.dataResolution);
 
       // Remap direction based on camera rotation (world direction → visual direction)
-      const visualDirection = this.getVisualDirection(player.direction);
+      const visualDirection = this.getVisualDirection(entity.direction);
 
       // Try to get pre-computed resolution, fall back to base frames
       let directionFrames = sprite.resolutions?.[resKey]?.[visualDirection];
@@ -626,18 +723,19 @@ export class ViewportRenderer {
         directionFrames = sprite.frames[visualDirection];
       }
 
-      const rawFrame = directionFrames[player.animationFrame];
+      const rawFrame = directionFrames[entity.animationFrame];
       if (!rawFrame) continue;
 
       // Scale to exact tile render size if needed (with caching)
       // Use visual direction in cache key since same world direction shows different sprite when rotated
-      const frameId = `player:${player.userId}:${visualDirection}:${player.animationFrame}`;
+      const entityType = isPlayerEntity ? 'player' : 'npc';
+      const frameId = `${entityType}:${entityId}:${visualDirection}:${entity.animationFrame}`;
       const frame = this.scaleFrame(rawFrame, this.tileRenderSize, this.tileRenderSize, frameId);
 
       // Calculate screen position with rotation
-      // World pixel position of player (center of their tile)
-      const worldPixelX = (player.x + 0.5) * this.tileRenderSize;
-      const worldPixelY = (player.y + 0.5) * this.tileRenderSize;
+      // World pixel position of entity (center of their tile)
+      const worldPixelX = (entity.x + 0.5) * this.tileRenderSize;
+      const worldPixelY = (entity.y + 0.5) * this.tileRenderSize;
       // Transform to screen coordinates (offset from screen center)
       const screenOffset = this.worldToScreen(worldPixelX, worldPixelY, this.cameraCenterX, this.cameraCenterY);
       // Convert to buffer coordinates (top-left of sprite)
@@ -664,18 +762,25 @@ export class ViewportRenderer {
         }
       }
 
-      // Add username overlay above sprite for other players
-      if (player.userId !== localId) {
-        // Center the username above the sprite
-        const usernamePixelX = screenX + Math.floor(this.tileRenderSize / 2);
-        const usernamePixelY = screenY - Math.max(6, Math.floor(this.tileRenderSize / 10));  // Scale overlay offset
+      // Add name overlay above sprite
+      // For players: show username for other players (not self)
+      // For NPCs: always show name
+      const showOverlay = isPlayerEntity ? entity.userId !== localId : true;
+      if (showOverlay) {
+        // Center the name above the sprite
+        const namePixelX = screenX + Math.floor(this.tileRenderSize / 2);
+        const namePixelY = screenY - Math.max(6, Math.floor(this.tileRenderSize / 10));  // Scale overlay offset
+
+        // NPCs get a slightly different color scheme (amber/gold text)
+        const overlayColors = isPlayerEntity
+          ? { bgColor: { r: 40, g: 40, b: 60 }, fgColor: { r: 255, g: 255, b: 255 } }  // Players: blue-gray bg, white text
+          : { bgColor: { r: 60, g: 50, b: 30 }, fgColor: { r: 255, g: 200, b: 100 } }; // NPCs: brown bg, gold text
 
         this.pendingOverlays.push({
-          text: player.username,
-          pixelX: usernamePixelX,
-          pixelY: usernamePixelY,
-          bgColor: { r: 40, g: 40, b: 60 },    // Dark blue-gray background
-          fgColor: { r: 255, g: 255, b: 255 }, // White text
+          text: entityName,
+          pixelX: namePixelX,
+          pixelY: namePixelY,
+          ...overlayColors,
         });
       }
     }
@@ -699,6 +804,36 @@ export class ViewportRenderer {
 
     // Simple colored square placeholder
     const placeholderColor: RGB = { r: 255, g: 200, b: 50 };
+    for (let py = 0; py < markerSize; py++) {
+      for (let px = 0; px < markerSize; px++) {
+        const targetY = screenY + py;
+        const targetX = screenX + px;
+        if (targetY >= 0 && targetY < buffer.length &&
+            targetX >= 0 && targetX < (buffer[targetY]?.length ?? 0)) {
+          buffer[targetY]![targetX] = placeholderColor;
+        }
+      }
+    }
+  }
+
+  /**
+   * Render a placeholder for NPCs without sprites
+   * Uses a different color scheme to distinguish from players
+   */
+  private renderPlaceholderNPC(buffer: PixelGrid, npc: NPCVisualState, screenCenterX: number, screenCenterY: number): void {
+    // Calculate screen position with rotation
+    const worldPixelX = (npc.x + 0.5) * this.tileRenderSize;
+    const worldPixelY = (npc.y + 0.5) * this.tileRenderSize;
+    const screenOffset = this.worldToScreen(worldPixelX, worldPixelY, this.cameraCenterX, this.cameraCenterY);
+    // Use Math.floor for consistent alignment with terrain tiles
+    const screenX = Math.floor(screenCenterX + screenOffset.x - this.tileRenderSize / 2);
+    const screenY = Math.floor(screenCenterY + screenOffset.y - this.tileRenderSize / 2);
+
+    // Marker is same size as current tile render size
+    const markerSize = this.tileRenderSize;
+
+    // NPC placeholder color (amber/orange to distinguish from yellow player)
+    const placeholderColor: RGB = { r: 255, g: 150, b: 50 };
     for (let py = 0; py < markerSize; py++) {
       for (let px = 0; px < markerSize; px++) {
         const targetY = screenY + py;

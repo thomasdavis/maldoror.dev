@@ -1,3 +1,5 @@
+import type { NPCVisualState } from './npc.js';
+
 /**
  * RGB color for a single pixel
  */
@@ -132,7 +134,7 @@ export type BuildingDirection = 'north' | 'east' | 'south' | 'west';
 
 /**
  * World data provider interface
- * Used by renderers to get tile and player data
+ * Used by renderers to get tile, player, and NPC data
  */
 export interface WorldDataProvider {
   getTile(tileX: number, tileY: number): Tile | null;
@@ -140,4 +142,10 @@ export interface WorldDataProvider {
   getPlayers(): PlayerVisualState[];
   getPlayerSprite(userId: string): Sprite | null;
   getLocalPlayerId(): string;
+  // NPC methods (optional for backwards compatibility)
+  getNPCs?(): NPCVisualState[];
+  getNPCSprite?(npcId: string): Sprite | null;
+  // Road methods (optional for backwards compatibility)
+  hasRoadAt?(x: number, y: number): boolean;
+  getRoadTileAt?(x: number, y: number): Tile | null;
 }
