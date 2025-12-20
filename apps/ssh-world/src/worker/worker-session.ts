@@ -174,7 +174,14 @@ export class WorkerSession {
    * Handle input data from main process
    */
   handleInput(data: Buffer): void {
-    if (this.inputRouter && !this.destroyed && !this.inputPaused) {
+    if (this.destroyed) return;
+
+    if (this.inputPaused) {
+      // When paused (modal screens open), push input to stream
+      // so modal screens can receive it via stream.on('data', ...)
+      this.stream.pushInput(data);
+    } else if (this.inputRouter) {
+      // Normal game mode - route through InputRouter
       this.inputRouter.process(data);
     }
   }

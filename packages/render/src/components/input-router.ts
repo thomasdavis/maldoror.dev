@@ -66,9 +66,11 @@ export class InputRouter {
       { key: 't', action: 'start_chat' },
       { key: 'T', action: 'start_chat' },
       { key: 'Escape', action: 'open_menu' },
-      // Road placement (replaces regenerate_avatar)
+      // Road placement
       { key: 'r', action: 'place_road' },
       { key: 'R', shift: true, action: 'remove_road' },
+      // Avatar regeneration
+      { key: '.', action: 'regenerate_avatar' },
       // Building placement
       { key: 'b', action: 'place_building' },
       { key: 'B', action: 'place_building' },
