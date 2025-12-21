@@ -4,19 +4,16 @@ type Connection = ssh2.Connection;
 type Session = ssh2.Session;
 import { readFileSync, existsSync } from 'fs';
 import { createHash } from 'crypto';
-import { GameSession } from './game-session.js';
+import { SessionProxy } from './session-proxy.js';
 import { WorkerManager } from './worker-manager.js';
 import { db, schema } from '@maldoror/db';
 import { eq } from 'drizzle-orm';
-import type { ProviderConfig } from '@maldoror/ai';
 
 interface SSHServerConfig {
   port: number;
   hostKeyPath: string;
   banner?: string;
   workerManager: WorkerManager;
-  worldSeed: bigint;
-  providerConfig: ProviderConfig;
 }
 
 interface ClientContext {
@@ -29,7 +26,7 @@ interface ClientContext {
 
 export class SSHServer {
   private server: InstanceType<typeof Server>;
-  private sessions: Map<string, GameSession> = new Map();
+  private sessions: Map<string, SessionProxy> = new Map();
   private config: SSHServerConfig;
 
   constructor(config: SSHServerConfig) {
@@ -181,27 +178,35 @@ export class SSHServer {
 
       const stream = accept();
 
-      // Create game session
-      const gameSession = new GameSession({
+      // Create session proxy (thin layer - game logic runs in worker)
+      const sessionProxy = new SessionProxy({
         stream,
         fingerprint: context.fingerprint,
         username: context.username,
-        userId: context.userId,
+        userId: context.userId || null,
         cols: ptyInfo.cols,
         rows: ptyInfo.rows,
         workerManager: this.config.workerManager,
-        worldSeed: this.config.worldSeed,
-        providerConfig: this.config.providerConfig,
       });
 
-      this.sessions.set(context.fingerprint, gameSession);
-      await gameSession.start();
+      this.sessions.set(context.fingerprint, sessionProxy);
+
+      // Set up input forwarding
+      stream.on('data', (data: Buffer) => {
+        sessionProxy.handleInput(data);
+      });
+
+      stream.on('close', () => {
+        this.handleDisconnect(context.fingerprint);
+      });
+
+      await sessionProxy.start();
     });
 
     session.on('window-change', (accept, _reject, info) => {
-      const gameSession = this.sessions.get(context.fingerprint);
-      if (gameSession) {
-        gameSession.resize(info.cols, info.rows);
+      const sessionProxy = this.sessions.get(context.fingerprint);
+      if (sessionProxy) {
+        sessionProxy.resize(info.cols, info.rows);
       }
       accept?.();
     });
@@ -217,5 +222,24 @@ export class SSHServer {
 
   getSessionCount(): number {
     return this.sessions.size;
+  }
+
+  /**
+   * Get transport metrics from all active sessions
+   * Used by stats server to report backpressure stats
+   *
+   * Note: With SessionProxy architecture, transport metrics are now
+   * in the worker process. This returns an empty array for now.
+   * TODO: Implement IPC to get metrics from worker sessions.
+   */
+  getTransportMetrics(): Array<{
+    queuedBytes: number;
+    droppedFrames: number;
+    drainCount: number;
+    totalBytesWritten: number;
+  }> {
+    // Transport metrics are now in worker process (WorkerSession)
+    // For now, return empty array. Could implement IPC query if needed.
+    return [];
   }
 }

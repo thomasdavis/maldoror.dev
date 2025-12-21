@@ -12,6 +12,34 @@ echo "Server: $SERVER"
 echo "Deploy dir: $DEPLOY_DIR"
 echo ""
 
+# Check for active image generations before deploying
+# This prevents wasting OpenAI credits by restarting mid-generation
+STATS_URL="http://134.199.180.251:3000/operations"
+echo ">>> Checking for active image generations..."
+OPERATIONS_JSON=$(curl -s --connect-timeout 5 "$STATS_URL" 2>/dev/null || echo '{"error":"unreachable"}')
+
+if echo "$OPERATIONS_JSON" | grep -q '"error"'; then
+    echo "    Server unreachable (first deploy or server down) - proceeding"
+elif echo "$OPERATIONS_JSON" | grep -q '"safe_to_deploy":false'; then
+    ACTIVE_OPS=$(echo "$OPERATIONS_JSON" | grep -o '"active_operations":\[[^]]*\]' || echo "unknown")
+    echo ""
+    echo "!!! WARNING: Active image generations in progress !!!"
+    echo "    $ACTIVE_OPS"
+    echo ""
+    echo "    Deploying now will waste OpenAI credits."
+    echo "    Wait for generations to complete or use --force to override."
+    echo ""
+    if [ "$1" != "--force" ]; then
+        echo "Aborting deploy. Use 'deploy.sh --force' to override."
+        exit 1
+    else
+        echo "    --force flag used, proceeding anyway..."
+    fi
+else
+    echo "    No active generations - safe to deploy"
+fi
+echo ""
+
 # Check for .env.prod file
 if [ ! -f "$PROJECT_ROOT/deploy/.env.prod" ]; then
     echo "ERROR: deploy/.env.prod not found!"
@@ -81,6 +109,9 @@ scp "$PROJECT_ROOT/deploy/.env.prod" "$SERVER:$DEPLOY_DIR/.env"
 echo ">>> Fixing file permissions..."
 ssh_cmd "chmod 644 $DEPLOY_DIR/deploy/haproxy.cfg"
 
+echo ">>> Generating version..."
+"$PROJECT_ROOT/apps/ssh-world/scripts/generate-version.sh"
+
 echo ">>> Building locally for dist sync..."
 cd "$PROJECT_ROOT"
 pnpm build
@@ -99,6 +130,8 @@ cd "$PROJECT_ROOT"
 
 echo ">>> Syncing dist directories..."
 rsync -avz --delete -e "ssh -p $ADMIN_SSH_PORT" "$PROJECT_ROOT/apps/ssh-world/dist/" "$SERVER:$DEPLOY_DIR/apps/ssh-world/dist/"
+# Sync version.json AFTER dist (so --delete doesn't remove it)
+rsync -avz -e "ssh -p $ADMIN_SSH_PORT" "$PROJECT_ROOT/apps/ssh-world/src/version.json" "$SERVER:$DEPLOY_DIR/apps/ssh-world/dist/"
 rsync -avz --delete -e "ssh -p $ADMIN_SSH_PORT" "$PROJECT_ROOT/packages/ai/dist/" "$SERVER:$DEPLOY_DIR/packages/ai/dist/"
 rsync -avz --delete -e "ssh -p $ADMIN_SSH_PORT" "$PROJECT_ROOT/packages/db/dist/" "$SERVER:$DEPLOY_DIR/packages/db/dist/"
 rsync -avz --delete -e "ssh -p $ADMIN_SSH_PORT" "$PROJECT_ROOT/packages/protocol/dist/" "$SERVER:$DEPLOY_DIR/packages/protocol/dist/"

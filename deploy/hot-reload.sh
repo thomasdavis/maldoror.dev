@@ -18,6 +18,10 @@ ssh_cmd() {
     ssh -o ConnectTimeout=5 -p $ADMIN_SSH_PORT $SERVER "$@"
 }
 
+# Generate version info (git hash + timestamp)
+echo ">>> Generating version..."
+"$PROJECT_ROOT/apps/ssh-world/scripts/generate-version.sh"
+
 # Build locally first
 echo ">>> Building locally..."
 cd "$PROJECT_ROOT"
@@ -40,6 +44,11 @@ echo ">>> Syncing dist files to server..."
 rsync -avz --delete \
     -e "ssh -p $ADMIN_SSH_PORT" \
     "$PROJECT_ROOT/apps/ssh-world/dist/" "$SERVER:$DEPLOY_DIR/apps/ssh-world/dist/"
+
+# Sync version.json AFTER dist (so --delete doesn't remove it)
+rsync -avz \
+    -e "ssh -p $ADMIN_SSH_PORT" \
+    "$PROJECT_ROOT/apps/ssh-world/src/version.json" "$SERVER:$DEPLOY_DIR/apps/ssh-world/dist/"
 
 rsync -avz --delete \
     -e "ssh -p $ADMIN_SSH_PORT" \

@@ -6,6 +6,7 @@ import {
   HelpModalComponent,
   PlayerListComponent,
   ReloadOverlayComponent,
+  OutputPump,
   BG_PRIMARY,
   CRIMSON_BRIGHT,
   ACCENT_GOLD,
@@ -20,12 +21,14 @@ import { WorkerManager, ReloadState } from './worker-manager.js';
 import { OnboardingFlow } from './onboarding.js';
 import { AvatarScreen } from './avatar-screen.js';
 import { BuildingScreen } from './building-screen.js';
+import { NPCScreen } from './npc-screen.js';
 import { BootScreen } from './boot-screen.js';
 import { db, schema } from '@maldoror/db';
-import { eq, and, between } from 'drizzle-orm';
+import { eq, and, between, inArray } from 'drizzle-orm';
 import type { ProviderConfig } from '@maldoror/ai';
 import { saveSpriteToDisk, loadSpriteFromDisk } from '../utils/sprite-storage.js';
 import { saveBuildingToDisk, loadAllBuildingDirections } from '../utils/building-storage.js';
+import { resourceMonitor } from '../utils/resource-monitor.js';
 
 interface GameSessionConfig {
   stream: Duplex;
@@ -95,6 +98,33 @@ export class GameSession {
   private unsubscribeReload: (() => void) | null = null;
   // Adaptive tick rate based on zoom level
   private currentTickMs: number = 67;  // Default 15fps
+  // OutputPump for SSH backpressure handling
+  private outputPump: OutputPump | null = null;
+  // Non-blocking visible players refresh
+  private visiblePlayersInFlight: Promise<void> | null = null;
+  private visiblePlayersLastUpdate: number = 0;
+  private readonly VISIBLE_PLAYERS_TTL_MS = 200;  // Stale-while-revalidate
+  // Non-blocking visible NPCs refresh
+  private cachedVisibleNPCs: Array<{
+    npcId: string;
+    name: string;
+    x: number;
+    y: number;
+    direction: string;
+    animationFrame: number;
+    isMoving: boolean;
+  }> = [];
+  private visibleNPCsInFlight: Promise<void> | null = null;
+  private visibleNPCsLastUpdate: number = 0;
+  private loadingNPCSprites: Set<string> = new Set();
+
+  // === OPTIMISTIC MOVEMENT SYSTEM ===
+  // Movement prediction - track pending server confirmations
+  private pendingMoves: Array<{ seq: number; x: number; y: number; direction: Direction }> = [];
+  // Momentum tracking for running animation
+  private consecutiveMoveDirection: Direction | null = null;
+  private consecutiveMoveCount: number = 0;
+  private readonly MOMENTUM_THRESHOLD = 3;  // After 3 same-direction moves, show "running"
 
   constructor(config: GameSessionConfig) {
     this.stream = config.stream;
@@ -125,6 +155,9 @@ export class GameSession {
       this.userId = result.userId;
       this.username = result.username;
     }
+
+    // Track connection for resource monitoring
+    resourceMonitor.trackConnection(this.sessionId, this.username);
 
     // Show boot screen for returning users
     const boot = new BootScreen(this.stream, this.cols, this.rows);
@@ -253,6 +286,11 @@ export class GameSession {
       this.handleBuildingPlacement(buildingId, anchorX, anchorY);
     });
 
+    // Register for NPC creation events
+    this.workerManager.onNPCCreated(this.userId!, (npc) => {
+      this.handleNPCCreated(npc);
+    });
+
     // Subscribe to reload state changes for hot reload overlay
     this.unsubscribeReload = this.workerManager.onReloadState((state) => {
       this.reloadState = state;
@@ -264,6 +302,9 @@ export class GameSession {
 
     // Clean up boot screen and start game
     boot.hide();
+
+    // Initialize OutputPump for SSH backpressure handling
+    this.outputPump = new OutputPump(this.stream, { maxQueuedBytes: 512 * 1024 });
 
     // Show dramatic "FIGHT!" entrance screen (Mortal Kombat style)
     await this.showEntranceScreen();
@@ -291,8 +332,23 @@ export class GameSession {
     this.tileProvider.updatePlayer(state);
   }
 
-  private async tick(): Promise<void> {
+  private tick(): void {
     if (this.destroyed || !this.renderer || !this.tileProvider) return;
+
+    // Check if OutputPump exists and is healthy
+    if (!this.outputPump || this.outputPump.isDestroyed()) {
+      // Destroy old pump if it exists (to remove event listeners)
+      if (this.outputPump) {
+        this.outputPump.destroy();
+      }
+      // Recreate OutputPump if destroyed (e.g., from stream error during modal)
+      this.outputPump = new OutputPump(this.stream, { maxQueuedBytes: 512 * 1024 });
+    }
+
+    // BACKPRESSURE: Skip frame if SSH buffer is congested
+    if (this.outputPump.shouldSkipFrame(128 * 1024)) {
+      return;  // Let client catch up
+    }
 
     // Show reload overlay if reloading
     if (this.reloadState === 'reloading') {
@@ -318,29 +374,20 @@ export class GameSession {
     // Increment tick counter for periodic refreshes
     this.tickCounter++;
 
-    // Performance: Only refresh visible players if moved >2 tiles OR periodically (every ~3 seconds = 45 ticks)
-    const POSITION_THRESHOLD = 2;
-    const positionChanged =
-      Math.abs(this.playerX - this.lastQueryX) > POSITION_THRESHOLD ||
-      Math.abs(this.playerY - this.lastQueryY) > POSITION_THRESHOLD;
-    const periodicRefresh = this.tickCounter % 45 === 0;
-    if (positionChanged || periodicRefresh) {
-      this.cachedVisiblePlayers = await this.workerManager.getVisiblePlayers(
-        this.playerX,
-        this.playerY,
-        this.cols,
-        this.rows,
-        this.userId!
-      );
-      this.lastQueryX = this.playerX;
-      this.lastQueryY = this.playerY;
-    }
+    // NON-BLOCKING: Stale-while-revalidate for visible players and NPCs
+    this.refreshVisiblePlayersIfNeeded();
+    this.refreshVisibleNPCsIfNeeded();
 
     // Collect missing sprite IDs for batch loading
     const missingPlayerIds: string[] = [];
 
-    // Update other players in tile provider
+    // Update other players in tile provider (uses cached data, never blocks)
     for (const player of this.cachedVisiblePlayers) {
+      // SAFEGUARD: Skip local player - should be excluded by query, but double-check
+      if (player.userId === this.userId) {
+        console.warn('[GameSession] BUG: Local player found in cachedVisiblePlayers!');
+        continue;
+      }
       const state: PlayerVisualState = {
         userId: player.userId,
         username: player.username,
@@ -361,10 +408,35 @@ export class GameSession {
       }
     }
 
-    // Performance: Batch load all missing sprites at once
+    // NON-BLOCKING: Fire-and-forget sprite loading (placeholder already set above)
     if (missingPlayerIds.length > 0) {
       missingPlayerIds.forEach(id => this.loadingSprites.add(id));
-      this.batchLoadPlayerSprites(missingPlayerIds);
+      void this.batchLoadPlayerSprites(missingPlayerIds);  // Don't await!
+    }
+
+    // Update visible NPCs in tile provider (uses cached data, never blocks)
+    const missingNPCIds: string[] = [];
+    for (const npc of this.cachedVisibleNPCs) {
+      this.tileProvider.updateNPC({
+        npcId: npc.npcId,
+        name: npc.name,
+        x: npc.x,
+        y: npc.y,
+        direction: npc.direction as Direction,
+        animationFrame: npc.animationFrame as AnimationFrame,
+        isMoving: npc.isMoving,
+      });
+
+      // Collect missing NPC sprites for loading
+      if (!this.tileProvider.getNPCSprite(npc.npcId) && !this.loadingNPCSprites.has(npc.npcId)) {
+        missingNPCIds.push(npc.npcId);
+      }
+    }
+
+    // NON-BLOCKING: Fire-and-forget NPC sprite loading
+    if (missingNPCIds.length > 0) {
+      missingNPCIds.forEach(id => this.loadingNPCSprites.add(id));
+      void this.batchLoadNPCSprites(missingNPCIds);  // Don't await!
     }
 
     // Center camera on player
@@ -378,9 +450,99 @@ export class GameSession {
       output += this.componentManager.renderToString();
     }
 
-    // Single write for entire frame
+    // BACKPRESSURE: Route through OutputPump instead of direct stream.write()
     if (output) {
-      this.stream.write(output);
+      this.outputPump.enqueue(output);
+    }
+  }
+
+  /**
+   * NON-BLOCKING: Refresh visible players using stale-while-revalidate pattern
+   * Returns immediately with cached data, fires off refresh in background if stale
+   */
+  private refreshVisiblePlayersIfNeeded(): void {
+    const now = Date.now();
+
+    // Check if data is still fresh
+    if (now - this.visiblePlayersLastUpdate < this.VISIBLE_PLAYERS_TTL_MS) {
+      return;  // Use cached data
+    }
+
+    // Check position change threshold
+    const POSITION_THRESHOLD = 2;
+    const positionChanged =
+      Math.abs(this.playerX - this.lastQueryX) > POSITION_THRESHOLD ||
+      Math.abs(this.playerY - this.lastQueryY) > POSITION_THRESHOLD;
+
+    // Only refresh if TTL expired OR significant position change
+    if (!positionChanged && now - this.visiblePlayersLastUpdate < 3000) {
+      return;  // Not stale enough yet
+    }
+
+    // Already have a request in flight - don't pile up
+    if (this.visiblePlayersInFlight) {
+      return;
+    }
+
+    // Fire-and-forget: Update cache in background
+    this.visiblePlayersInFlight = this.workerManager
+      .getVisiblePlayers(this.playerX, this.playerY, this.cols, this.rows, this.userId!)
+      .then(players => {
+        this.cachedVisiblePlayers = players;
+        this.visiblePlayersLastUpdate = Date.now();
+        this.lastQueryX = this.playerX;
+        this.lastQueryY = this.playerY;
+      })
+      .catch(err => console.error('[GameSession] Visible players fetch failed:', err))
+      .finally(() => {
+        this.visiblePlayersInFlight = null;
+      });
+  }
+
+  /**
+   * NON-BLOCKING: Refresh visible NPCs using stale-while-revalidate pattern
+   */
+  private refreshVisibleNPCsIfNeeded(): void {
+    const now = Date.now();
+
+    // Check if data is still fresh
+    if (now - this.visibleNPCsLastUpdate < this.VISIBLE_PLAYERS_TTL_MS) {
+      return;  // Use cached data
+    }
+
+    // Already have a request in flight - don't pile up
+    if (this.visibleNPCsInFlight) {
+      return;
+    }
+
+    // Fire-and-forget: Update cache in background
+    this.visibleNPCsInFlight = this.workerManager
+      .getVisibleNPCs(this.playerX, this.playerY, this.cols, this.rows)
+      .then(npcs => {
+        this.cachedVisibleNPCs = npcs;
+        this.visibleNPCsLastUpdate = Date.now();
+      })
+      .catch(err => console.error('[GameSession] Visible NPCs fetch failed:', err))
+      .finally(() => {
+        this.visibleNPCsInFlight = null;
+      });
+  }
+
+  /**
+   * NON-BLOCKING: Load NPC sprites in batch
+   */
+  private async batchLoadNPCSprites(npcIds: string[]): Promise<void> {
+    for (const npcId of npcIds) {
+      try {
+        const sprite = await this.workerManager.getNPCSprite(npcId);
+        if (sprite && this.tileProvider) {
+          this.tileProvider.setNPCSprite(npcId, sprite);
+        }
+      } catch (err) {
+        console.error(`[GameSession] Failed to load NPC sprite ${npcId}:`, err);
+      } finally {
+        this.loadingNPCSprites.delete(npcId);
+      }
     }
   }
 
@@ -430,6 +592,9 @@ export class GameSession {
         break;
       case 'place_building':
         this.openBuildingScreen();
+        break;
+      case 'create_npc':
+        this.openNPCScreen();
         break;
       case 'toggle_players':
         this.togglePlayerList();
@@ -587,20 +752,20 @@ export class GameSession {
 
       const result = await screen.run();
 
-      if (result.action === 'confirm' && result.sprite && result.prompt) {
+      if (result.action === 'confirm' && result.result && result.prompt) {
         // Update local prompt
         this.currentPrompt = result.prompt;
 
         // Save to database
         try {
-          await this.saveAvatar(result.prompt, result.sprite);
+          await this.saveAvatar(result.prompt, result.result);
         } catch (err) {
           console.error('Failed to save avatar:', err);
         }
 
         // Update local sprite
         if (this.tileProvider && this.userId) {
-          this.tileProvider.setPlayerSprite(this.userId, result.sprite);
+          this.tileProvider.setPlayerSprite(this.userId, result.result);
         }
 
         // Broadcast to all players
@@ -680,10 +845,10 @@ export class GameSession {
 
       const result = await screen.run();
 
-      if (result.action === 'confirm' && result.sprite && result.prompt) {
+      if (result.action === 'confirm' && result.result && result.prompt) {
         // Save building
         try {
-          await this.saveBuilding(result.prompt, result.sprite);
+          await this.saveBuilding(result.prompt, result.result);
         } catch (err) {
           console.error('Failed to save building:', err);
         }
@@ -765,6 +930,81 @@ export class GameSession {
   }
 
   /**
+   * Open the NPC creation screen
+   */
+  private async openNPCScreen(): Promise<void> {
+    // Pause input handling
+    this.inputPaused = true;
+
+    // Pause render loop
+    if (this.tickInterval) {
+      clearInterval(this.tickInterval);
+      this.tickInterval = null;
+    }
+
+    // Clean up current renderer state
+    this.renderer?.cleanup();
+
+    try {
+      // Run NPC screen
+      const screen = new NPCScreen({
+        stream: this.stream,
+        providerConfig: this.providerConfig,
+        username: this.username,
+        playerX: this.playerX,
+        playerY: this.playerY,
+      });
+
+      const result = await screen.run();
+
+      if (result.action === 'confirm' && result.result && result.prompt) {
+        // Create NPC via worker
+        const npcData = {
+          creatorId: this.userId!,
+          name: result.result.name,
+          prompt: result.prompt,
+          spawnX: this.playerX,
+          spawnY: this.playerY,
+          roamRadius: 15,
+          playerAffinity: 50,
+          sprite: result.result.sprite,
+        };
+
+        const createdNpc = await this.workerManager.createNPC(npcData);
+
+        if (createdNpc) {
+          console.log(`[NPC] Created "${createdNpc.name}" at (${createdNpc.x}, ${createdNpc.y})`);
+
+          // Add NPC to local tile provider
+          this.tileProvider?.updateNPC(createdNpc);
+
+          // Load and cache the sprite
+          const sprite = await this.workerManager.getNPCSprite(createdNpc.npcId);
+          if (sprite) {
+            this.tileProvider?.setNPCSprite(createdNpc.npcId, sprite);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('NPC screen error:', err);
+    }
+
+    // Reinitialize renderer and resume
+    this.renderer = new PixelGameRenderer({
+      stream: this.stream,
+      cols: this.cols,
+      rows: this.rows,
+      username: this.username,
+    });
+    this.renderer.initialize();
+
+    // Resume input handling and render loop
+    this.inputPaused = false;
+    this.renderer.invalidate();
+    this.tickInterval = setInterval(() => this.tick(), 67);
+  }
+
+  /**
    * Load nearby buildings into the tile provider
    */
   private async loadNearbyBuildings(): Promise<void> {
@@ -823,6 +1063,32 @@ export class GameSession {
   }
 
   /**
+   * Handle NPC creation broadcast from another player
+   */
+  private async handleNPCCreated(npc: { npcId: string; name: string; x: number; y: number; direction: string; animationFrame: number; isMoving: boolean }): Promise<void> {
+    if (!this.tileProvider) return;
+
+    // Add NPC to tile provider
+    this.tileProvider.updateNPC({
+      npcId: npc.npcId,
+      name: npc.name,
+      x: npc.x,
+      y: npc.y,
+      direction: npc.direction as Direction,
+      animationFrame: npc.animationFrame as AnimationFrame,
+      isMoving: npc.isMoving,
+    });
+
+    // Load sprite
+    const sprite = await this.workerManager.getNPCSprite(npc.npcId);
+    if (sprite) {
+      this.tileProvider.setNPCSprite(npc.npcId, sprite);
+    }
+
+    console.log(`[NPC] Received NPC "${npc.name}" at (${npc.x}, ${npc.y})`);
+  }
+
+  /**
    * Handle sprite reload event from another player
    */
   private async handleSpriteReload(changedUserId: string): Promise<void> {
@@ -854,44 +1120,71 @@ export class GameSession {
 
   /**
    * Batch load multiple player sprites in parallel
-   * More efficient than loading one at a time when multiple players enter viewport
+   * OPTIMIZED: Uses single batched DB query instead of N+1 queries
    */
   private async batchLoadPlayerSprites(playerIds: string[]): Promise<void> {
     if (!this.tileProvider || playerIds.length === 0) return;
 
-    // Load all sprites in parallel
-    await Promise.all(playerIds.map(async (playerId) => {
-      try {
-        // Try file first
-        const sprite = await loadSpriteFromDisk(playerId);
-        if (sprite) {
-          this.tileProvider?.setPlayerSprite(playerId, sprite);
-          return;
+    // Phase 1: Try loading all sprites from disk in parallel
+    const diskResults = await Promise.all(
+      playerIds.map(async (playerId) => {
+        try {
+          const sprite = await loadSpriteFromDisk(playerId);
+          return { playerId, sprite, success: !!sprite };
+        } catch {
+          return { playerId, sprite: null, success: false };
         }
+      })
+    );
 
-        // Fallback to database
-        const avatar = await db.query.avatars.findFirst({
-          where: eq(schema.avatars.userId, playerId),
-        });
+    // Set sprites that loaded from disk
+    const needsDbLookup: string[] = [];
+    for (const result of diskResults) {
+      if (result.success && result.sprite) {
+        this.tileProvider?.setPlayerSprite(result.playerId, result.sprite);
+        this.loadingSprites.delete(result.playerId);
+      } else {
+        needsDbLookup.push(result.playerId);
+      }
+    }
 
-        if (avatar?.spriteJson) {
-          this.tileProvider?.setPlayerSprite(playerId, avatar.spriteJson as Sprite);
+    // Phase 2: Batch query database for remaining players (single query!)
+    if (needsDbLookup.length > 0) {
+      try {
+        const avatars: Array<{ userId: string; spriteJson: Sprite | null }> = await db.select({
+          userId: schema.avatars.userId,
+          spriteJson: schema.avatars.spriteJson,
+        })
+          .from(schema.avatars)
+          .where(inArray(schema.avatars.userId, needsDbLookup)) as Array<{ userId: string; spriteJson: Sprite | null }>;
+
+        // Create a map for O(1) lookup
+        const avatarMap = new Map(avatars.map(a => [a.userId, a]));
+
+        for (const playerId of needsDbLookup) {
+          const avatar = avatarMap.get(playerId);
+          if (avatar?.spriteJson) {
+            this.tileProvider?.setPlayerSprite(playerId, avatar.spriteJson);
+          }
+          this.loadingSprites.delete(playerId);
         }
       } catch (error) {
-        console.error(`Failed to load sprite for ${playerId}:`, error);
-      } finally {
-        this.loadingSprites.delete(playerId);
+        console.error('Failed to batch load avatars from DB:', error);
+        // Clean up loading state on error
+        for (const playerId of needsDbLookup) {
+          this.loadingSprites.delete(playerId);
+        }
       }
-    }));
+    }
   }
 
   /**
    * Move in a screen-relative direction (remapped based on camera rotation)
+   * Simplified: removed input coalescing to fix direction flickering bug
    */
   private moveScreenRelative(screenDirection: Direction): void {
     const worldDirection = this.getWorldDirection(screenDirection);
 
-    // Convert direction to delta
     const deltas: Record<Direction, { dx: number; dy: number }> = {
       up: { dx: 0, dy: -1 },
       down: { dx: 0, dy: 1 },
@@ -900,11 +1193,30 @@ export class GameSession {
     };
 
     const { dx, dy } = deltas[worldDirection];
-    this.move(dx, dy, worldDirection);
+
+    // MOMENTUM: Track consecutive same-direction moves
+    if (this.consecutiveMoveDirection === worldDirection) {
+      this.consecutiveMoveCount++;
+    } else {
+      this.consecutiveMoveDirection = worldDirection;
+      this.consecutiveMoveCount = 1;
+    }
+
+    // Execute the movement
+    this.moveOptimistic(dx, dy, worldDirection);
   }
 
-  private move(dx: number, dy: number, direction: Direction): void {
-    // Check if target tile is walkable
+  /**
+   * Optimistic movement with instant visual feedback
+   * STRATEGY 1: Optimistic Movement Echo
+   * STRATEGY 2: Movement Prediction with Rollback
+   */
+  private moveOptimistic(dx: number, dy: number, direction: Direction): void {
+    // Clamp movement to 1 tile max per call (prevent teleporting from coalesced inputs)
+    dx = Math.max(-1, Math.min(1, dx));
+    dy = Math.max(-1, Math.min(1, dy));
+
+    // Check if target tile is walkable (local prediction)
     const targetX = this.playerX + dx;
     const targetY = this.playerY + dy;
     const targetTile = this.tileProvider?.getTile(targetX, targetY);
@@ -918,15 +1230,69 @@ export class GameSession {
       return;  // Can't move into building tile
     }
 
+    // === STRATEGY 1: OPTIMISTIC MOVEMENT ECHO ===
+    // Send immediate visual update BEFORE anything else
+    this.sendImmediatePositionUpdate(targetX, targetY);
+
+    // Update local predicted position
     this.playerX = targetX;
     this.playerY = targetY;
     this.playerDirection = direction;
     this.isMoving = true;
     this.inputSequence++;
 
+    // === STRATEGY 2: MOVEMENT PREDICTION ===
+    // Track this move for potential rollback
+    this.pendingMoves.push({
+      seq: this.inputSequence,
+      x: targetX,
+      y: targetY,
+      direction,
+    });
+
     // Update local state
     this.updateLocalPlayerState();
 
+    // Fire-and-forget server update (don't await)
+    this.sendMoveToServer(dx, dy, this.inputSequence);
+
+    // Update spatial index immediately
+    this.workerManager.updatePlayerPosition(this.userId!, this.playerX, this.playerY);
+
+    // Manage movement animation
+    this.updateMoveAnimation();
+  }
+
+  /**
+   * STRATEGY 1: Send immediate position echo
+   * Tiny update (~100-200 bytes) sent directly to stream, bypassing queue
+   */
+  private sendImmediatePositionUpdate(x: number, y: number): void {
+    if (!this.renderer || !this.outputPump) return;
+
+    // Calculate player's screen position (center of viewport)
+    const { cols, rows } = this.renderer.getDimensions();
+    const viewportCenterX = Math.floor(cols / 2);
+    const viewportCenterY = Math.floor((rows - 2) / 2) + 2;  // Account for header
+
+    // Build minimal ANSI update: just move cursor to player position
+    // This is ~30 bytes vs ~10KB for full frame
+    const ESC = '\x1b';
+
+    // Hide cursor and move to player position (triggers visual feedback)
+    const update = `${ESC}[?25l${ESC}[${viewportCenterY};${viewportCenterX}H`;
+
+    // Force immediate write (bypass queue, high priority)
+    this.outputPump.writeImmediate(update);
+
+    // Update renderer camera immediately for next frame
+    this.renderer.setCamera(x, y);
+  }
+
+  /**
+   * STRATEGY 2: Fire-and-forget server move with rollback on failure
+   */
+  private sendMoveToServer(dx: number, dy: number, sequence: number): void {
     // Queue input for worker manager
     this.workerManager.queueInput({
       userId: this.userId!,
@@ -934,21 +1300,34 @@ export class GameSession {
       type: 'move',
       payload: { dx, dy },
       timestamp: Date.now(),
-      sequence: this.inputSequence,
+      sequence,
     });
 
-    // Update spatial index
-    this.workerManager.updatePlayerPosition(this.userId!, this.playerX, this.playerY);
+    // TODO: Could add server confirmation callback here
+    // For now, we trust local collision detection and don't rollback
+    // Rollback would be needed for server-authoritative collision (e.g., other players)
+  }
 
-    // Stop "moving" animation after a short delay
+  /**
+   * Manage movement animation with momentum
+   */
+  private updateMoveAnimation(): void {
+    // Clear existing timer
     if (this.moveTimer) {
       clearTimeout(this.moveTimer);
     }
+
+    // MOMENTUM: Faster animation when running
+    const isRunning = this.consecutiveMoveCount >= this.MOMENTUM_THRESHOLD;
+    const animationDelay = isRunning ? 100 : 200;  // Faster reset when running
+
     this.moveTimer = setTimeout(() => {
       this.isMoving = false;
       this.playerAnimationFrame = 0;
+      this.consecutiveMoveCount = 0;
+      this.consecutiveMoveDirection = null;
       this.updateLocalPlayerState();
-    }, 200);
+    }, animationDelay);
   }
 
   resize(cols: number, rows: number): void {
@@ -1071,9 +1450,26 @@ export class GameSession {
     await new Promise(resolve => setTimeout(resolve, 400));
   }
 
+  /**
+   * Get OutputPump metrics for /stats endpoint
+   */
+  getTransportMetrics(): { queuedBytes: number; droppedFrames: number; drainCount: number; totalBytesWritten: number } | null {
+    if (!this.outputPump) return null;
+    const m = this.outputPump.getMetrics();
+    return {
+      queuedBytes: m.queuedBytes,
+      droppedFrames: m.droppedFrames,
+      drainCount: m.drainCount,
+      totalBytesWritten: m.totalBytesWritten,
+    };
+  }
+
   async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
+
+    // Untrack from resource monitor
+    resourceMonitor.untrackConnection(this.sessionId);
 
     // Stop tick loop
     if (this.tickInterval) {
@@ -1090,6 +1486,12 @@ export class GameSession {
     if (this.unsubscribeReload) {
       this.unsubscribeReload();
       this.unsubscribeReload = null;
+    }
+
+    // Clean up OutputPump
+    if (this.outputPump) {
+      this.outputPump.destroy();
+      this.outputPump = null;
     }
 
     // Remove sprite/building callbacks to prevent memory leaks

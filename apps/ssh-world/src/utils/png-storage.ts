@@ -12,6 +12,8 @@ const SPRITES_BASE = process.env.SPRITES_DIR ||
   (fs.existsSync('/app/sprites') ? '/app/sprites' : path.join(__dirname, '../../sprites'));
 const BUILDINGS_BASE = process.env.BUILDINGS_DIR ||
   (fs.existsSync('/app/buildings') ? '/app/buildings' : path.join(__dirname, '../../buildings'));
+const NPCS_BASE = process.env.NPCS_DIR ||
+  (fs.existsSync('/app/npcs') ? '/app/npcs' : path.join(__dirname, '../../npcs'));
 
 /**
  * Ensure sprite directory exists for a user
@@ -229,6 +231,63 @@ export async function getSpritePngSize(userId: string): Promise<number> {
  */
 export async function getBuildingPngSize(buildingId: string): Promise<number> {
   const dir = path.join(BUILDINGS_BASE, buildingId);
+  try {
+    const files = await fs.promises.readdir(dir);
+    let totalSize = 0;
+    for (const file of files) {
+      const stat = await fs.promises.stat(path.join(dir, file));
+      totalSize += stat.size;
+    }
+    return totalSize;
+  } catch {
+    return 0;
+  }
+}
+
+// ============== NPC PNG HELPERS ==============
+
+/**
+ * Ensure NPC sprite directory exists
+ */
+export function ensureNPCDir(npcId: string): string {
+  const dir = path.join(NPCS_BASE, npcId);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+/**
+ * Get NPC sprite PNG file path
+ */
+export function getNPCPngPath(
+  npcId: string,
+  direction: string,
+  frameNum: number,
+  resolution: number
+): string {
+  return path.join(NPCS_BASE, npcId, `frame_${direction}_${frameNum}_${resolution}.png`);
+}
+
+/**
+ * Delete all PNGs for an NPC
+ */
+export async function deleteNPCPngs(npcId: string): Promise<void> {
+  const dir = path.join(NPCS_BASE, npcId);
+  try {
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.error(`[PNG] Failed to delete NPC directory for ${npcId}:`, error);
+    }
+  }
+}
+
+/**
+ * Get total size of all PNGs for an NPC
+ */
+export async function getNPCPngSize(npcId: string): Promise<number> {
+  const dir = path.join(NPCS_BASE, npcId);
   try {
     const files = await fs.promises.readdir(dir);
     let totalSize = 0;

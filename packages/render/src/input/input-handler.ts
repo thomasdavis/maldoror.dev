@@ -60,6 +60,9 @@ export class InputHandler {
       // Building placement
       { key: 'b', action: 'place_building' },
       { key: 'B', action: 'place_building' },
+      // NPC creation
+      { key: 'n', action: 'create_npc' },
+      { key: 'N', action: 'create_npc' },
       // Zoom controls
       { key: '+', action: 'zoom_in' },
       { key: '=', action: 'zoom_in' },

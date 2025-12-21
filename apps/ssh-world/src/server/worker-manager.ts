@@ -13,11 +13,13 @@
 import { fork, ChildProcess } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import type { PlayerInput } from '@maldoror/protocol';
+import type { PlayerInput, NPCVisualState, Sprite } from '@maldoror/protocol';
+import type { ProviderConfig } from '@maldoror/ai';
 import type {
   MainToWorkerMessage,
   WorkerToMainMessage,
 } from '../worker/game-worker.js';
+import type { NPCCreateData } from '../utils/npc-storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -26,11 +28,34 @@ export type ReloadState = 'running' | 'reloading';
 export type ReloadCallback = (state: ReloadState) => void;
 export type SpriteReloadCallback = (userId: string) => void;
 export type BuildingPlacementCallback = (buildingId: string, anchorX: number, anchorY: number) => void;
+export type NPCCreatedCallback = (npc: NPCVisualState) => void;
+export type SessionOutputCallback = (sessionId: string, output: string) => void;
+export type SessionUserIdCallback = (sessionId: string, userId: string) => void;
+export type SessionEndedCallback = (sessionId: string) => void;
+
+export interface SessionRestoredState {
+  playerX: number;
+  playerY: number;
+  zoomLevel: number;
+  renderMode: string;
+  cameraMode: string;
+}
+
+export interface WorkerSessionConfig {
+  sessionId: string;
+  fingerprint: string;
+  username: string;
+  userId: string | null;
+  cols: number;
+  rows: number;
+  restoredState?: SessionRestoredState;
+}
 
 interface WorkerManagerConfig {
   worldSeed: bigint;
   tickRate: number;
   chunkCacheSize: number;
+  providerConfig: ProviderConfig;
 }
 
 interface PendingRequest {
@@ -54,10 +79,17 @@ export class WorkerManager {
   private reloadCallbacks: Set<ReloadCallback> = new Set();
   private spriteReloadCallbacks: Map<string, SpriteReloadCallback> = new Map();
   private buildingPlacementCallbacks: Map<string, BuildingPlacementCallback> = new Map();
+  private npcCreatedCallbacks: Map<string, NPCCreatedCallback> = new Map();
   private pendingRequests: Map<string, PendingRequest> = new Map();
   private requestIdCounter: number = 0;
   // Track connected sessions so we can re-register after hot reload
   private connectedSessions: Map<string, ConnectedSession> = new Map();
+  // Session callbacks for hot-reload architecture
+  private sessionOutputCallbacks: Map<string, SessionOutputCallback> = new Map();
+  private sessionUserIdCallbacks: Map<string, SessionUserIdCallback> = new Map();
+  private sessionEndedCallbacks: Map<string, SessionEndedCallback> = new Map();
+  // Track worker sessions for hot-reload re-registration
+  private workerSessions: Map<string, WorkerSessionConfig> = new Map();
 
   constructor(config: WorkerManagerConfig) {
     this.config = config;
@@ -96,16 +128,36 @@ export class WorkerManager {
 
   /**
    * Hot reload - spawn fresh worker and re-register sessions
-   * No state serialization needed - sessions have their own positions
-   * and the database is the source of truth.
+   * Preserves session state (player position, zoom, camera mode) across reloads.
    */
   async hotReload(): Promise<void> {
     console.log('[WorkerManager] Hot reload initiated...');
-    console.log(`[WorkerManager] ${this.connectedSessions.size} sessions to re-register`);
+    console.log(`[WorkerManager] ${this.connectedSessions.size} legacy sessions, ${this.workerSessions.size} worker sessions to re-register`);
 
     // Notify all sessions that we're reloading
     this.reloadState = 'reloading';
     this.notifyReloadState();
+
+    // Capture session states before killing worker
+    let sessionStates: Map<string, SessionRestoredState> = new Map();
+    if (this.workerReady && this.workerSessions.size > 0) {
+      try {
+        const states = await this.getAllSessionStates();
+        for (const state of states) {
+          sessionStates.set(state.sessionId, {
+            playerX: state.playerX,
+            playerY: state.playerY,
+            zoomLevel: state.zoomLevel,
+            renderMode: state.renderMode,
+            cameraMode: state.cameraMode,
+          });
+        }
+        console.log(`[WorkerManager] Captured ${sessionStates.size} session states`);
+      } catch (error) {
+        console.error('[WorkerManager] Failed to capture session states:', error);
+        // Continue with hot reload anyway, sessions will start fresh
+      }
+    }
 
     try {
       // Kill current worker
@@ -118,16 +170,38 @@ export class WorkerManager {
       // Small delay to ensure process is fully terminated
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      // Spawn fresh worker (no state to transfer)
+      // Spawn fresh worker
       await this.spawnWorker();
 
-      // Re-register all connected sessions with the new worker
+      // Re-register all connected sessions with the new worker (legacy system)
       for (const session of this.connectedSessions.values()) {
         this.sendToWorker({
           type: 'player_connect',
           userId: session.userId,
           sessionId: session.sessionId,
           username: session.username,
+        });
+      }
+
+      // Re-register all worker sessions with restored state
+      for (const config of this.workerSessions.values()) {
+        const restoredState = sessionStates.get(config.sessionId);
+        this.sendToWorker({
+          type: 'create_session',
+          sessionId: config.sessionId,
+          fingerprint: config.fingerprint,
+          username: config.username,
+          userId: config.userId,
+          cols: config.cols,
+          rows: config.rows,
+          restoredState: restoredState ? {
+            sessionId: config.sessionId,
+            playerX: restoredState.playerX,
+            playerY: restoredState.playerY,
+            zoomLevel: restoredState.zoomLevel,
+            renderMode: restoredState.renderMode,
+            cameraMode: restoredState.cameraMode,
+          } : undefined,
         });
       }
 
@@ -141,6 +215,30 @@ export class WorkerManager {
     // Notify all sessions that reload is complete
     this.reloadState = 'running';
     this.notifyReloadState();
+  }
+
+  /**
+   * Request all session states from worker (for hot-reload preservation)
+   */
+  private async getAllSessionStates(): Promise<Array<{
+    sessionId: string;
+    playerX: number;
+    playerY: number;
+    zoomLevel: number;
+    renderMode: string;
+    cameraMode: string;
+  }>> {
+    if (!this.isReady()) return [];
+
+    const requestId = this.nextRequestId();
+    return this.sendRequest(
+      {
+        type: 'get_all_session_states',
+        requestId,
+      },
+      requestId,
+      'all_session_states'
+    );
   }
 
   /**
@@ -177,6 +275,20 @@ export class WorkerManager {
    */
   offBuildingPlacement(userId: string): void {
     this.buildingPlacementCallbacks.delete(userId);
+  }
+
+  /**
+   * Subscribe to NPC created broadcasts
+   */
+  onNPCCreated(userId: string, callback: NPCCreatedCallback): void {
+    this.npcCreatedCallbacks.set(userId, callback);
+  }
+
+  /**
+   * Unsubscribe from NPC created broadcasts
+   */
+  offNPCCreated(userId: string): void {
+    this.npcCreatedCallbacks.delete(userId);
   }
 
   /**
@@ -220,6 +332,7 @@ export class WorkerManager {
     });
     this.spriteReloadCallbacks.delete(userId);
     this.buildingPlacementCallbacks.delete(userId);
+    this.npcCreatedCallbacks.delete(userId);
   }
 
   queueInput(input: PlayerInput): void {
@@ -333,6 +446,166 @@ export class WorkerManager {
     for (const [_userId, callback] of this.buildingPlacementCallbacks) {
       callback(buildingId, anchorX, anchorY);
     }
+
+    // Update worker's building collision cache for NPC pathfinding
+    if (this.isReady()) {
+      this.sendToWorker({
+        type: 'add_building_collision',
+        anchorX,
+        anchorY,
+      });
+    }
+  }
+
+  // === NPC Methods ===
+
+  async getVisibleNPCs(
+    x: number,
+    y: number,
+    cols: number,
+    rows: number
+  ): Promise<NPCVisualState[]> {
+    if (!this.isReady()) return [];
+
+    const requestId = this.nextRequestId();
+    return this.sendRequest<NPCVisualState[]>(
+      {
+        type: 'get_visible_npcs',
+        requestId,
+        x,
+        y,
+        cols,
+        rows,
+      },
+      requestId,
+      'visible_npcs'
+    );
+  }
+
+  async getNPCSprite(npcId: string): Promise<Sprite | null> {
+    if (!this.isReady()) return null;
+
+    const requestId = this.nextRequestId();
+    const response = await this.sendRequest<{ npcId: string; sprite: Sprite | null }>(
+      {
+        type: 'get_npc_sprite',
+        requestId,
+        npcId,
+      },
+      requestId,
+      'npc_sprite'
+    );
+    return response.sprite;
+  }
+
+  async createNPC(data: NPCCreateData): Promise<NPCVisualState | null> {
+    if (!this.isReady()) return null;
+
+    const requestId = this.nextRequestId();
+    return this.sendRequest<NPCVisualState>(
+      {
+        type: 'create_npc',
+        requestId,
+        data,
+      },
+      requestId,
+      'npc_created'
+    );
+  }
+
+  // === Session Methods (Hot-Reload Architecture) ===
+
+  /**
+   * Create a new session in the worker
+   */
+  async createWorkerSession(config: WorkerSessionConfig): Promise<void> {
+    // Track for hot-reload re-registration
+    this.workerSessions.set(config.sessionId, config);
+
+    if (!this.isReady()) return;
+
+    this.sendToWorker({
+      type: 'create_session',
+      sessionId: config.sessionId,
+      fingerprint: config.fingerprint,
+      username: config.username,
+      userId: config.userId,
+      cols: config.cols,
+      rows: config.rows,
+    });
+  }
+
+  /**
+   * Destroy a session in the worker
+   */
+  async destroyWorkerSession(sessionId: string): Promise<void> {
+    // Remove from tracked sessions
+    this.workerSessions.delete(sessionId);
+    this.sessionOutputCallbacks.delete(sessionId);
+    this.sessionUserIdCallbacks.delete(sessionId);
+    this.sessionEndedCallbacks.delete(sessionId);
+
+    if (!this.worker) return;
+
+    this.sendToWorker({
+      type: 'destroy_session',
+      sessionId,
+    });
+  }
+
+  /**
+   * Forward input data to worker session
+   */
+  sendSessionInput(sessionId: string, data: Buffer): void {
+    if (!this.isReady()) return;
+
+    this.sendToWorker({
+      type: 'session_input',
+      sessionId,
+      data: Array.from(data),
+    });
+  }
+
+  /**
+   * Forward resize event to worker session
+   */
+  sendSessionResize(sessionId: string, cols: number, rows: number): void {
+    if (!this.isReady()) return;
+
+    // Also update stored config
+    const config = this.workerSessions.get(sessionId);
+    if (config) {
+      config.cols = cols;
+      config.rows = rows;
+    }
+
+    this.sendToWorker({
+      type: 'session_resize',
+      sessionId,
+      cols,
+      rows,
+    });
+  }
+
+  /**
+   * Register callback for session output
+   */
+  onSessionOutput(sessionId: string, callback: SessionOutputCallback): void {
+    this.sessionOutputCallbacks.set(sessionId, callback);
+  }
+
+  /**
+   * Register callback for session userId updates (after onboarding)
+   */
+  onSessionUserId(sessionId: string, callback: SessionUserIdCallback): void {
+    this.sessionUserIdCallbacks.set(sessionId, callback);
+  }
+
+  /**
+   * Register callback for session ended events
+   */
+  onSessionEnded(sessionId: string, callback: SessionEndedCallback): void {
+    this.sessionEndedCallbacks.set(sessionId, callback);
   }
 
   // === Private Methods ===
@@ -389,6 +662,7 @@ export class WorkerManager {
         worldSeed: this.config.worldSeed.toString(),
         tickRate: this.config.tickRate,
         chunkCacheSize: this.config.chunkCacheSize,
+        providerConfig: this.config.providerConfig,
       });
     });
   }
@@ -410,6 +684,84 @@ export class WorkerManager {
         // Forward sprite reload to all sessions
         for (const [_userId, callback] of this.spriteReloadCallbacks) {
           callback(msg.userId);
+        }
+        break;
+      }
+
+      // NPC response handlers
+      case 'visible_npcs': {
+        const pending = this.pendingRequests.get(msg.requestId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pendingRequests.delete(msg.requestId);
+          pending.resolve(msg.npcs);
+        }
+        break;
+      }
+
+      case 'npc_sprite': {
+        const pending = this.pendingRequests.get(msg.requestId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pendingRequests.delete(msg.requestId);
+          pending.resolve({ npcId: msg.npcId, sprite: msg.sprite });
+        }
+        break;
+      }
+
+      case 'npc_created': {
+        const pending = this.pendingRequests.get(msg.requestId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pendingRequests.delete(msg.requestId);
+          pending.resolve(msg.npc);
+        }
+        break;
+      }
+
+      case 'npc_created_broadcast': {
+        // Forward NPC creation to all sessions
+        for (const [_userId, callback] of this.npcCreatedCallbacks) {
+          callback(msg.npc);
+        }
+        break;
+      }
+
+      case 'all_session_states': {
+        const pending = this.pendingRequests.get(msg.requestId);
+        if (pending) {
+          clearTimeout(pending.timeout);
+          this.pendingRequests.delete(msg.requestId);
+          pending.resolve(msg.states);
+        }
+        break;
+      }
+
+      case 'session_output': {
+        const callback = this.sessionOutputCallbacks.get(msg.sessionId);
+        if (callback) {
+          callback(msg.sessionId, msg.output);
+        }
+        break;
+      }
+
+      case 'session_user_id': {
+        const callback = this.sessionUserIdCallbacks.get(msg.sessionId);
+        if (callback) {
+          callback(msg.sessionId, msg.userId);
+        }
+        // Update stored config with new userId
+        const config = this.workerSessions.get(msg.sessionId);
+        if (config) {
+          config.userId = msg.userId;
+        }
+        break;
+      }
+
+      case 'session_ended': {
+        const callback = this.sessionEndedCallbacks.get(msg.sessionId);
+        if (callback) {
+          callback(msg.sessionId);
         }
         break;
       }

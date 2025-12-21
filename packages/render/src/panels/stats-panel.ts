@@ -19,9 +19,11 @@ export class StatsPanel extends Panel {
       { char: ' ', bg: { type: 'rgb', value: [20, 20, 30] } }
     );
 
-    // Left side: username
+    // Left side: username and version
     const username = state.player.username;
+    const version = state.serverVersion ? ` ${state.serverVersion}` : '';
     this.renderText(1, 0, username, { type: 'rgb', value: [255, 215, 0] }, true);
+    this.renderText(1 + username.length, 0, version, { type: 'rgb', value: [100, 100, 140] });
 
     // Center: coordinates
     const coords = `(${state.player.x}, ${state.player.y})`;

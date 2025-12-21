@@ -3,8 +3,9 @@ set -e
 
 echo "Starting Maldoror SSH World..."
 
-# Set Node.js memory limit (2GB heap for building sprite data)
-export NODE_OPTIONS="--max-old-space-size=2048"
+# Set Node.js memory limit (5.5GB heap - leave room for container overhead)
+# Enable GC exposure for better memory management
+export NODE_OPTIONS="--max-old-space-size=5632 --expose-gc"
 
 # Generate SSH host key if it doesn't exist
 if [ ! -f "$SSH_HOST_KEY_PATH" ]; then
@@ -19,5 +20,7 @@ cd /app/packages/db && npx drizzle-kit push --force
 cd /app
 
 # Start the SSH server
+# Using exec node directly so Node.js becomes PID 1 and receives signals (for hot-reload)
 echo "Starting SSH server..."
-exec pnpm --filter @maldoror/ssh-world start
+cd /app/apps/ssh-world
+exec node dist/index.js

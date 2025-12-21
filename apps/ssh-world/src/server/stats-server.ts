@@ -4,14 +4,65 @@ import { sql, count, min, max } from 'drizzle-orm';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { WorkerManager } from './worker-manager.js';
+import { resourceMonitor } from '../utils/resource-monitor.js';
 
 // Asset directories
 const BUILDINGS_DIR = process.env.BUILDINGS_DIR || '/app/buildings';
 const SPRITES_DIR = process.env.SPRITES_DIR || '/app/sprites';
 
+// Log capture ring buffer
+const MAX_LOG_LINES = 2000;
+const logBuffer: { timestamp: Date; level: string; message: string }[] = [];
+
+function captureLog(level: string, ...args: unknown[]): void {
+  const message = args.map(arg =>
+    typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+  ).join(' ');
+
+  logBuffer.push({ timestamp: new Date(), level, message });
+
+  // Trim buffer if too large
+  while (logBuffer.length > MAX_LOG_LINES) {
+    logBuffer.shift();
+  }
+}
+
+// Intercept console methods
+const originalLog = console.log.bind(console);
+const originalError = console.error.bind(console);
+const originalWarn = console.warn.bind(console);
+
+console.log = (...args: unknown[]) => {
+  captureLog('INFO', ...args);
+  originalLog(...args);
+};
+
+console.error = (...args: unknown[]) => {
+  captureLog('ERROR', ...args);
+  originalError(...args);
+};
+
+console.warn = (...args: unknown[]) => {
+  captureLog('WARN', ...args);
+  originalWarn(...args);
+};
+
+// Export for external access
+export function getLogs(): typeof logBuffer {
+  return logBuffer;
+}
+
+interface TransportMetrics {
+  queuedBytes: number;
+  droppedFrames: number;
+  drainCount: number;
+  totalBytesWritten: number;
+}
+
 interface StatsServerConfig {
   port: number;
   getSessionCount: () => number;
+  getTransportMetrics?: () => TransportMetrics[];  // Returns metrics from all active sessions
   workerManager: WorkerManager;
   worldSeed: bigint;
   startTime: Date;
@@ -69,6 +120,14 @@ interface WorldStats {
     building_tiles: number;
     sprite_frames: number;
   };
+  transport?: {
+    total_sessions: number;
+    total_queued_bytes: number;
+    total_dropped_frames: number;
+    total_drain_events: number;
+    total_bytes_written: number;
+    peak_queued_bytes: number;
+  };
 }
 
 // Cache stats for 30 seconds to avoid hammering DB
@@ -121,6 +180,19 @@ export class StatsServer {
     } else if (url.pathname === '/health' || url.pathname === '/health/') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+    } else if (url.pathname === '/operations' || url.pathname === '/operations/') {
+      // Check for active generation operations (used by deploy script)
+      const activeOps = resourceMonitor.getActiveOperations();
+      const hasActiveGenerations = resourceMonitor.hasActiveGenerations();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        active_operations: activeOps,
+        has_active_generations: hasActiveGenerations,
+        safe_to_deploy: !hasActiveGenerations,
+        timestamp: new Date().toISOString(),
+      }));
+    } else if (url.pathname === '/logs' || url.pathname === '/logs/') {
+      this.serveLogsPage(req, res, url);
     } else if (url.pathname === '/files' || url.pathname === '/files/') {
       // File browser index
       this.serveFileBrowserIndex(res);
@@ -134,9 +206,184 @@ export class StatsServer {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         error: 'Not found',
-        endpoints: ['/stats', '/health', '/files', '/files/buildings', '/files/sprites']
+        endpoints: ['/stats', '/health', '/operations', '/logs', '/files', '/files/buildings', '/files/sprites']
       }));
     }
+  }
+
+  private serveLogsPage(_req: IncomingMessage, res: ServerResponse, url: URL): void {
+    // Check for JSON format
+    const format = url.searchParams.get('format');
+    if (format === 'json') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(logBuffer, null, 2));
+      return;
+    }
+
+    // Check for plain text format
+    if (format === 'text') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      const text = logBuffer.map(entry => {
+        const ts = entry.timestamp.toISOString().replace('T', ' ').replace('Z', '');
+        return `[${ts}] [${entry.level}] ${entry.message}`;
+      }).join('\n');
+      res.end(text);
+      return;
+    }
+
+    // Filter by level
+    const levelFilter = url.searchParams.get('level')?.toUpperCase();
+    const filteredLogs = levelFilter
+      ? logBuffer.filter(entry => entry.level === levelFilter)
+      : logBuffer;
+
+    // Auto-refresh interval (default 5 seconds)
+    const refresh = parseInt(url.searchParams.get('refresh') || '5', 10);
+
+    const escapeHtml = (str: string): string => {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    };
+
+    const formatTimestamp = (date: Date): string => {
+      return date.toISOString().replace('T', ' ').replace('Z', '');
+    };
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="${refresh}">
+  <title>Maldoror Server Logs</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+      background: #0a0a0f;
+      color: #e0e0e0;
+      margin: 0;
+      padding: 20px;
+      line-height: 1.4;
+      font-size: 12px;
+    }
+    h1 { color: #ff9900; margin-bottom: 5px; font-size: 1.4em; }
+    .subtitle { color: #666; margin-bottom: 15px; font-size: 0.9em; }
+    .controls {
+      display: flex;
+      gap: 15px;
+      margin-bottom: 15px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .controls a, .controls select {
+      background: #1a1a25;
+      color: #66aaff;
+      padding: 6px 12px;
+      border-radius: 4px;
+      text-decoration: none;
+      border: 1px solid #333;
+      font-size: 0.85em;
+    }
+    .controls a:hover { background: #252535; }
+    .controls a.active { background: #333; color: #fff; }
+    .controls select { cursor: pointer; }
+    .stats {
+      color: #888;
+      font-size: 0.85em;
+    }
+    .log-container {
+      background: #0d0d12;
+      border: 1px solid #222;
+      border-radius: 8px;
+      overflow: auto;
+      max-height: calc(100vh - 180px);
+    }
+    .log-entry {
+      padding: 4px 12px;
+      border-bottom: 1px solid #1a1a1f;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-entry:hover { background: #151520; }
+    .log-entry:last-child { border-bottom: none; }
+    .log-timestamp { color: #555; margin-right: 10px; }
+    .log-level {
+      display: inline-block;
+      width: 50px;
+      font-weight: bold;
+      margin-right: 10px;
+    }
+    .log-message { color: #ccc; }
+    .level-ERROR { color: #ff6b6b; }
+    .level-WARN { color: #ffd93d; }
+    .level-INFO { color: #6bcb77; }
+    .empty { color: #666; padding: 40px; text-align: center; }
+    .scroll-bottom {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #333;
+      color: #fff;
+      padding: 10px 15px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85em;
+      border: none;
+    }
+    .scroll-bottom:hover { background: #444; }
+  </style>
+</head>
+<body>
+  <h1>Server Logs</h1>
+  <p class="subtitle">Auto-refreshes every ${refresh}s • Last ${filteredLogs.length} entries</p>
+
+  <div class="controls">
+    <a href="/logs" class="${!levelFilter ? 'active' : ''}">All</a>
+    <a href="/logs?level=info" class="${levelFilter === 'INFO' ? 'active' : ''}">Info</a>
+    <a href="/logs?level=warn" class="${levelFilter === 'WARN' ? 'active' : ''}">Warn</a>
+    <a href="/logs?level=error" class="${levelFilter === 'ERROR' ? 'active' : ''}">Error</a>
+    <span class="stats">|</span>
+    <a href="/logs?format=json">JSON</a>
+    <a href="/logs?format=text">Plain Text</a>
+    <span class="stats">|</span>
+    <span class="stats">Refresh:
+      <a href="/logs?refresh=2${levelFilter ? '&level=' + levelFilter.toLowerCase() : ''}" class="${refresh === 2 ? 'active' : ''}">2s</a>
+      <a href="/logs?refresh=5${levelFilter ? '&level=' + levelFilter.toLowerCase() : ''}" class="${refresh === 5 ? 'active' : ''}">5s</a>
+      <a href="/logs?refresh=30${levelFilter ? '&level=' + levelFilter.toLowerCase() : ''}" class="${refresh === 30 ? 'active' : ''}">30s</a>
+      <a href="/logs?refresh=0${levelFilter ? '&level=' + levelFilter.toLowerCase() : ''}" class="${refresh === 0 ? 'active' : ''}">off</a>
+    </span>
+  </div>
+
+  <div class="log-container" id="logs">
+    ${filteredLogs.length === 0 ? '<div class="empty">No logs yet</div>' : ''}
+    ${filteredLogs.map(entry => `
+      <div class="log-entry">
+        <span class="log-timestamp">${formatTimestamp(entry.timestamp)}</span>
+        <span class="log-level level-${entry.level}">${entry.level}</span>
+        <span class="log-message">${escapeHtml(entry.message)}</span>
+      </div>
+    `).join('')}
+  </div>
+
+  <button class="scroll-bottom" onclick="scrollToBottom()">↓ Scroll to Bottom</button>
+
+  <script>
+    function scrollToBottom() {
+      const container = document.getElementById('logs');
+      container.scrollTop = container.scrollHeight;
+    }
+    // Auto-scroll to bottom on load
+    scrollToBottom();
+  </script>
+</body>
+</html>`;
+
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(html);
   }
 
   private serveFileBrowserIndex(res: ServerResponse): void {
@@ -677,6 +924,49 @@ export class StatsServer {
         buildings: buildingsCount[0]?.count ?? 0,
         building_tiles: buildingTilesCount[0]?.count ?? 0,
         sprite_frames: spriteFramesCount[0]?.count ?? 0,
+      },
+      ...this.getTransportStats(),
+    };
+  }
+
+  /**
+   * Gather transport (SSH backpressure) metrics from all sessions
+   */
+  private getTransportStats(): { transport?: WorldStats['transport'] } {
+    if (!this.config.getTransportMetrics) {
+      return {};
+    }
+
+    const metrics = this.config.getTransportMetrics();
+    if (metrics.length === 0) {
+      return {};
+    }
+
+    // Aggregate metrics across all sessions
+    let totalQueuedBytes = 0;
+    let totalDroppedFrames = 0;
+    let totalDrainEvents = 0;
+    let totalBytesWritten = 0;
+    let peakQueuedBytes = 0;
+
+    for (const m of metrics) {
+      totalQueuedBytes += m.queuedBytes;
+      totalDroppedFrames += m.droppedFrames;
+      totalDrainEvents += m.drainCount;
+      totalBytesWritten += m.totalBytesWritten;
+      if (m.queuedBytes > peakQueuedBytes) {
+        peakQueuedBytes = m.queuedBytes;
+      }
+    }
+
+    return {
+      transport: {
+        total_sessions: metrics.length,
+        total_queued_bytes: totalQueuedBytes,
+        total_dropped_frames: totalDroppedFrames,
+        total_drain_events: totalDrainEvents,
+        total_bytes_written: totalBytesWritten,
+        peak_queued_bytes: peakQueuedBytes,
       },
     };
   }

@@ -51,10 +51,18 @@ services:
       SSH_PORT: "2222"
       SSH_HOST_KEY_PATH: /app/apps/ssh-world/keys/host.key
       NODE_ENV: production
+    # Memory limits to prevent OOM crashes
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+        reservations:
+          memory: 1G
     volumes:
       - ssh_keys:/app/apps/ssh-world/keys
       - sprites_data:/app/sprites
       - buildings_data:/app/buildings
+      - npcs_data:/app/npcs
       # Mount dist directories for hot reload (code can be updated without container restart)
       - ../apps/ssh-world/dist:/app/apps/ssh-world/dist:ro
       - ../packages/ai/dist:/app/packages/ai/dist:ro
@@ -83,6 +91,7 @@ volumes:
   ssh_keys:
   sprites_data:
   buildings_data:
+  npcs_data:
 
 networks:
   maldoror:

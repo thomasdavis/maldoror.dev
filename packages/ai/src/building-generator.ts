@@ -7,7 +7,17 @@ import { BASE_SIZE, RESOLUTIONS } from '@maldoror/protocol';
 
 // Configure Sharp for better memory management in high-concurrency environments
 sharp.cache(false);     // Disable file cache to free memory immediately
-sharp.concurrency(2);   // Limit parallel Sharp operations to prevent memory spikes
+sharp.concurrency(1);   // Single thread to prevent memory spikes
+sharp.simd(false);      // Disable SIMD to reduce memory per operation
+
+/**
+ * Trigger garbage collection if available (requires --expose-gc)
+ */
+function tryGC(): void {
+  if (typeof global.gc === 'function') {
+    global.gc();
+  }
+}
 
 /**
  * Building direction type for camera rotation support
@@ -342,7 +352,9 @@ export async function generateBuildingSprite(
   const debugDir = path.join(DEBUG_DIR, `${timestamp}_${safeUsername}`);
 
   const progress = (step: string, current: number, total: number) => {
-    console.log(`[BUILDING ${current}/${total}] ${step}`);
+    const mem = process.memoryUsage();
+    const heapMB = (mem.heapUsed / 1024 / 1024).toFixed(0);
+    console.log(`[BUILDING ${current}/${total}] ${step} (heap: ${heapMB}MB)`);
     onProgress?.(step, current, total);
   };
 
@@ -387,14 +399,27 @@ export async function generateBuildingSprite(
       west: westImage,
     };
 
-    // Step 3: Process all 4 directions into BuildingSprites in parallel
+    // Step 3: Process all 4 directions into BuildingSprites SEQUENTIALLY to reduce memory
     progress('Processing tiles for all directions', 3, 5);
-    const [north, east, south, west] = await Promise.all([
-      processImageToSprite(buildingImages.north, debugDir, 'north'),
-      processImageToSprite(buildingImages.east, debugDir, 'east'),
-      processImageToSprite(buildingImages.south, debugDir, 'south'),
-      processImageToSprite(buildingImages.west, debugDir, 'west'),
-    ]);
+
+    // Process one at a time and clear buffers immediately after
+    const north = await processImageToSprite(northImage, debugDir, 'north');
+    // Clear the buffer reference - let GC reclaim it
+    (buildingImages as Record<string, Buffer | null>).north = null;
+    tryGC();
+
+    const east = await processImageToSprite(eastImage, debugDir, 'east');
+    (buildingImages as Record<string, Buffer | null>).east = null;
+    tryGC();
+
+    const south = await processImageToSprite(southImage, debugDir, 'south');
+    (buildingImages as Record<string, Buffer | null>).south = null;
+    tryGC();
+
+    const west = await processImageToSprite(westImage, debugDir, 'west');
+    (buildingImages as Record<string, Buffer | null>).west = null;
+    tryGC();
+
     const directionalSprite: DirectionalBuildingSprite = { north, east, south, west };
 
     // Step 4: Save summary data for debugging (full sprite JSON is too large)

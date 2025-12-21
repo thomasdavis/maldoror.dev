@@ -8,10 +8,20 @@ import { StatsServer } from './server/stats-server.js';
 import { WorkerManager } from './server/worker-manager.js';
 import { db, schema } from '@maldoror/db';
 import type { ProviderConfig } from '@maldoror/ai';
+import { resourceMonitor } from './utils/resource-monitor.js';
+import { getVersion, refreshVersion } from './version.js';
+import { setBuildVersion } from '@maldoror/render';
 
 const startTime = new Date();
 
 async function main() {
+  // Set build version from version.json (generated at build time)
+  const versionInfo = getVersion();
+  setBuildVersion(versionInfo.version);
+  console.log(`Starting Maldoror SSH World Server ${versionInfo.version}`);
+
+  // Start resource monitoring immediately (log every 30 seconds)
+  resourceMonitor.start(30000);
   // Configure AI provider from environment
   const providerConfig: ProviderConfig = {
     provider: (process.env.AI_PROVIDER as 'openai' | 'anthropic') || 'openai',
@@ -42,6 +52,7 @@ async function main() {
     worldSeed,
     tickRate: 15,
     chunkCacheSize: 256,
+    providerConfig,
   });
 
   // Start worker
@@ -65,8 +76,6 @@ async function main() {
 \x1b[0m
 `,
     workerManager,
-    worldSeed,
-    providerConfig,
   });
 
   // Start SSH server
@@ -76,6 +85,7 @@ async function main() {
   const statsServer = new StatsServer({
     port: parseInt(process.env.STATS_PORT || '3000', 10),
     getSessionCount: () => sshServer.getSessionCount(),
+    getTransportMetrics: () => sshServer.getTransportMetrics(),
     workerManager,
     worldSeed,
     startTime,
@@ -87,6 +97,12 @@ async function main() {
   process.on('SIGUSR1', async () => {
     console.log('\n=== Hot reload triggered (SIGUSR1) ===');
     try {
+      // Re-read version.json (updated by deploy script)
+      refreshVersion();
+      const newVersion = getVersion();
+      setBuildVersion(newVersion.version);
+      console.log(`[Hot Reload] Updated version to ${newVersion.version}`);
+
       await workerManager.hotReload();
       console.log('=== Hot reload complete ===\n');
     } catch (error) {

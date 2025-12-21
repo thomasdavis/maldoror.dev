@@ -58,7 +58,12 @@ export {
 
 export {
   PixelGameRenderer,
+  setBuildVersion,
+  getBuildVersion,
   type PixelGameRendererConfig,
   type GameWorldAdapter,
   type RenderMode,
 } from './pixel/pixel-game-renderer.js';
+
+// Transport (backpressure handling)
+export { OutputPump, type OutputPumpMetrics } from './transport/index.js';

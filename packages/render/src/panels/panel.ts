@@ -42,6 +42,7 @@ export interface GameState {
     getTile: (x: number, y: number) => { char: string; fg?: string; bg?: string } | null;
   };
   tick: number;
+  serverVersion?: string;
 }
 
 /**

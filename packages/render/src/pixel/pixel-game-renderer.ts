@@ -23,6 +23,24 @@ export type { CameraMode } from './viewport-renderer.js';
 
 const ESC = '\x1b';
 
+// Build version - set dynamically by server from version.json
+let BUILD_VERSION = 'vdev';
+
+/**
+ * Set the build version to display in stats bar
+ * Called by server at startup with version from version.json
+ */
+export function setBuildVersion(version: string): void {
+  BUILD_VERSION = version;
+}
+
+/**
+ * Get the current build version
+ */
+export function getBuildVersion(): string {
+  return BUILD_VERSION;
+}
+
 /**
  * Layout configuration for the game screen
  * Defines reserved space for UI elements around the viewport
@@ -106,6 +124,10 @@ export class PixelGameRenderer {
   private framesSkipped: number = 0;
   // Cell-level diffing - store previous frame as cell grid
   private previousCells: CellGrid = [];
+  // Stats bar caching (1Hz update to reduce string formatting overhead)
+  private statsBarCache: string = '';
+  private statsBarLastRender: number = 0;
+  private readonly STATS_BAR_TTL_MS = 1000;  // 1Hz update
 
   constructor(config: PixelGameRendererConfig) {
     this.stream = config.stream;
@@ -300,6 +322,7 @@ export class PixelGameRenderer {
 
     this.forceRedraw = true;
     this.previousOutput = [];
+    this.invalidateStatsBar();
   }
 
   /**
@@ -468,11 +491,32 @@ export class PixelGameRenderer {
   }
 
   /**
-   * Render the stats bar showing username, coordinates, zoom, render mode, camera mode, rotation, and debug info
+   * Render the stats bar with 1Hz caching to reduce string formatting overhead
+   * Returns cached value if less than 1000ms has passed
+   */
+  private renderStatsBar(): string {
+    const now = Date.now();
+    if (now - this.statsBarLastRender < this.STATS_BAR_TTL_MS && this.statsBarCache) {
+      return this.statsBarCache;
+    }
+    this.statsBarLastRender = now;
+    this.statsBarCache = this.buildStatsBar();
+    return this.statsBarCache;
+  }
+
+  /**
+   * Invalidate stats bar cache (call on resize, zoom change, mode change)
+   */
+  invalidateStatsBar(): void {
+    this.statsBarLastRender = 0;
+  }
+
+  /**
+   * Build the stats bar showing username, coordinates, zoom, render mode, camera mode, rotation, and debug info
    * Returns 2 lines: main header bar + separator line
    * Uses brand colors - always dark
    */
-  private renderStatsBar(): string {
+  private buildStatsBar(): string {
     const tileSize = this.getCurrentTileSize();
     const { availableCols, availableRows } = this.getViewportArea();
     const { widthTiles, heightTiles } = this.calculateViewportTiles(availableCols, availableRows);
@@ -488,7 +532,8 @@ export class PixelGameRenderer {
     const reset = RESET;
 
     // Build header content with generous padding
-    const leftSection = `  ${fgName}${this.username}${fgLabel}`;
+    const fgVersion = `${ESC}[38;2;100;100;120m`; // Dim gray for version
+    const leftSection = `  ${fgName}${this.username} ${fgVersion}${BUILD_VERSION}${fgLabel}`;
 
     // Mode info
     const modeStr = this.renderMode === 'braille' ? 'BRAILLE' :
@@ -549,13 +594,14 @@ export class PixelGameRenderer {
   /**
    * Output frame using cell-level diffing for minimal bandwidth
    * Only emits ANSI codes for cells that changed since last frame
+   * OPTIMIZED: Uses array chunks and reference swap instead of deep copy
    */
   private outputFrameCellDiff(
     statsBar: string,
     viewportCells: CellGrid,
     overlays: TextOverlay[] = []
   ): void {
-    let output = '';
+    const chunks: string[] = [];
 
     // Performance: Only force full redraw when overlay count changes or dimensions change
     const overlayCountChanged = overlays.length !== this.previousOverlayCount;
@@ -566,15 +612,15 @@ export class PixelGameRenderer {
       overlayCountChanged;
 
     // Always write stats bar (it changes every frame with FPS/bytes counter)
-    output += `${ESC}[1;1H${statsBar}${ESC}[0m`;
+    chunks.push(`${ESC}[1;1H${statsBar}${ESC}[0m`);
 
     if (needsFullRedraw) {
       // Full redraw - write all cells
-      output += this.renderAllCells(viewportCells);
+      chunks.push(this.renderAllCells(viewportCells));
       this.forceRedraw = false;
     } else {
       // Cell-level diff - only write changed cells
-      output += this.renderChangedCells(viewportCells);
+      chunks.push(this.renderChangedCells(viewportCells));
     }
 
     // Render text overlays (usernames above players)
@@ -590,23 +636,26 @@ export class PixelGameRenderer {
       const overlayBg = `${ESC}[48;2;${overlay.bgColor.r};${overlay.bgColor.g};${overlay.bgColor.b}m`;
       const overlayFg = `${ESC}[38;2;${overlay.fgColor.r};${overlay.fgColor.g};${overlay.fgColor.b}m`;
 
-      output += `${ESC}[${terminalRow};${startCol}H${overlayBg}${overlayFg} ${overlay.text} ${ESC}[0m`;
+      chunks.push(`${ESC}[${terminalRow};${startCol}H${overlayBg}${overlayFg} ${overlay.text} ${ESC}[0m`);
     }
 
+    const output = chunks.join('');
     if (output) {
       this.lastFrameBytes = Buffer.byteLength(output, 'utf8');
       this.stream.write(output);
     }
 
-    // Deep copy for next frame comparison
-    this.previousCells = viewportCells.map(row => row.map(cell => ({ ...cell })));
+    // OPTIMIZED: Swap reference instead of deep copy
+    // The viewportCells is freshly created each frame, so we can take ownership
+    this.previousCells = viewportCells;
   }
 
   /**
    * Render all cells (for full redraw)
+   * OPTIMIZED: Uses array.push + join instead of string concatenation
    */
   private renderAllCells(cells: CellGrid): string {
-    let output = '';
+    const chunks: string[] = [];
     let lastFg: { r: number; g: number; b: number } | null = null;
     let lastBg: { r: number; g: number; b: number } | null = null;
 
@@ -615,7 +664,7 @@ export class PixelGameRenderer {
       if (!row) continue;
 
       // Move to start of viewport row (after stats bar)
-      output += `${ESC}[${y + this.layout.headerRows + 1};1H`;
+      chunks.push(`${ESC}[${y + this.layout.headerRows + 1};1H`);
 
       for (let x = 0; x < row.length; x++) {
         const cell = row[x];
@@ -623,29 +672,30 @@ export class PixelGameRenderer {
 
         // Emit foreground color if changed
         if (cell.fgColor && (!lastFg || !colorsEqual(cell.fgColor, lastFg))) {
-          output += fgColor(cell.fgColor);
+          chunks.push(fgColor(cell.fgColor));
           lastFg = cell.fgColor;
         }
 
         // Emit background color if changed
         if (cell.bgColor && (!lastBg || !colorsEqual(cell.bgColor, lastBg))) {
-          output += bgColor(cell.bgColor);
+          chunks.push(bgColor(cell.bgColor));
           lastBg = cell.bgColor;
         }
 
-        output += cell.char;
+        chunks.push(cell.char);
       }
     }
 
-    output += `${ESC}[0m`;
-    return output;
+    chunks.push(`${ESC}[0m`);
+    return chunks.join('');
   }
 
   /**
    * Render only changed cells (for incremental update)
+   * OPTIMIZED: Uses array.push + join instead of string concatenation
    */
   private renderChangedCells(cells: CellGrid): string {
-    let output = '';
+    const chunks: string[] = [];
     let lastX = -2;
     let lastY = -1;
     let lastFg: { r: number; g: number; b: number } | null = null;
@@ -666,31 +716,31 @@ export class PixelGameRenderer {
         if (lastY !== y || lastX !== x - 1) {
           // Account for multi-char cells in normal mode
           const termCol = this.renderMode === 'normal' ? x * 2 + 1 : x + 1;
-          output += `${ESC}[${y + this.layout.headerRows + 1};${termCol}H`;
+          chunks.push(`${ESC}[${y + this.layout.headerRows + 1};${termCol}H`);
         }
 
         // Emit foreground color if changed
         if (cell.fgColor && (!lastFg || !colorsEqual(cell.fgColor, lastFg))) {
-          output += fgColor(cell.fgColor);
+          chunks.push(fgColor(cell.fgColor));
           lastFg = cell.fgColor;
         }
 
         // Emit background color if changed
         if (cell.bgColor && (!lastBg || !colorsEqual(cell.bgColor, lastBg))) {
-          output += bgColor(cell.bgColor);
+          chunks.push(bgColor(cell.bgColor));
           lastBg = cell.bgColor;
         }
 
-        output += cell.char;
+        chunks.push(cell.char);
         lastX = x;
         lastY = y;
       }
     }
 
-    if (output) {
-      output += `${ESC}[0m`;
+    if (chunks.length > 0) {
+      chunks.push(`${ESC}[0m`);
     }
-    return output;
+    return chunks.join('');
   }
 
   /**
@@ -707,6 +757,7 @@ export class PixelGameRenderer {
     this.forceRedraw = true;
     this.previousOutput = [];
     this.previousCells = [];
+    this.invalidateStatsBar();
   }
 
   /**
@@ -756,7 +807,7 @@ export class PixelGameRenderer {
     // Update camera for new viewport dimensions
     this.viewportRenderer.setCamera(this.playerX, this.playerY);
 
-    this.invalidate();
+    this.invalidate();  // This also calls invalidateStatsBar()
   }
 
   /**

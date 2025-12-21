@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import type { BuildingSprite, PixelGrid } from '@maldoror/protocol';
 import { RESOLUTIONS } from '@maldoror/protocol';
 import { db, schema } from '@maldoror/db';
-import { eq, and, type InferSelectModel } from 'drizzle-orm';
+import { eq, and, sql, type InferSelectModel } from 'drizzle-orm';
 
 type BuildingTileRecord = InferSelectModel<typeof schema.buildingTiles>;
 import { BUILDING_DIRECTIONS, type BuildingDirection, type DirectionalBuildingSprite } from '@maldoror/ai';
@@ -19,6 +19,7 @@ export { BUILDING_DIRECTIONS, type BuildingDirection, type DirectionalBuildingSp
 /**
  * Save a directional building sprite to disk (all 4 orientations)
  * Also inserts rows into the building_tiles table
+ * OPTIMIZED: Batches all DB inserts into a single query
  */
 export async function saveBuildingToDisk(
   buildingId: string,
@@ -34,6 +35,17 @@ export async function saveBuildingToDisk(
   const directions: BuildingDirection[] = isDirectional
     ? BUILDING_DIRECTIONS
     : ['north']; // Legacy single-direction support
+
+  // Collect all file save operations and DB rows
+  const saveOperations: Array<{ filePath: string; pixels: PixelGrid }> = [];
+  const dbRows: Array<{
+    buildingId: string;
+    tileX: number;
+    tileY: number;
+    resolution: number;
+    direction: string;
+    filePath: string;
+  }> = [];
 
   for (const direction of directions) {
     const dirSprite = isDirectional
@@ -54,31 +66,50 @@ export async function saveBuildingToDisk(
           const filePath = getBuildingPngPath(buildingId, tileX, tileY, resolution, direction);
           const relativePath = `${buildingId}/tile_${direction}_${tileX}_${tileY}_${resolution}.png`;
 
-          await savePixelGridAsPng(pixels, filePath);
-
-          // Insert database row
-          await db.insert(schema.buildingTiles).values({
+          saveOperations.push({ filePath, pixels });
+          dbRows.push({
             buildingId,
             tileX,
             tileY,
             resolution,
             direction,
             filePath: relativePath,
-          }).onConflictDoUpdate({
-            target: [schema.buildingTiles.buildingId, schema.buildingTiles.tileX, schema.buildingTiles.tileY, schema.buildingTiles.resolution, schema.buildingTiles.direction],
-            set: { filePath: relativePath },
           });
-
-          totalFiles++;
-          try {
-            const stat = await fs.promises.stat(filePath);
-            totalSize += stat.size;
-          } catch {
-            // Ignore stat errors
-          }
         }
       }
     }
+  }
+
+  // Phase 1: Save all PNG files in parallel (I/O bound, parallelism helps)
+  await Promise.all(
+    saveOperations.map(async ({ filePath, pixels }) => {
+      await savePixelGridAsPng(pixels, filePath);
+      totalFiles++;
+      try {
+        const stat = await fs.promises.stat(filePath);
+        totalSize += stat.size;
+      } catch {
+        // Ignore stat errors
+      }
+    })
+  );
+
+  // Phase 2: Single batched DB insert (instead of N individual queries)
+  if (dbRows.length > 0) {
+    await db.insert(schema.buildingTiles)
+      .values(dbRows)
+      .onConflictDoUpdate({
+        target: [
+          schema.buildingTiles.buildingId,
+          schema.buildingTiles.tileX,
+          schema.buildingTiles.tileY,
+          schema.buildingTiles.resolution,
+          schema.buildingTiles.direction,
+        ],
+        set: {
+          filePath: sql`excluded.file_path`,
+        },
+      });
   }
 
   const dirCount = directions.length;
