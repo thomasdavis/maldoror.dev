@@ -5,3 +5,4 @@ export * from './render.js';
 export * from './sprite.js';
 export * from './pixel.js';
 export * from './building.js';
+export * from './npc.js';
