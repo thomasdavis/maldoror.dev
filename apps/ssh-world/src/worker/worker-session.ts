@@ -176,11 +176,11 @@ export class WorkerSession {
   handleInput(data: Buffer): void {
     if (this.destroyed) return;
 
-    if (this.inputPaused) {
-      // When paused (modal screens open), push input to stream
-      // so modal screens can receive it via stream.on('data', ...)
+    if (this.inputPaused || !this.inputRouter) {
+      // When paused (modal screens open) OR during onboarding (before inputRouter exists),
+      // push input to stream so screens can receive it via stream.on('data', ...)
       this.stream.pushInput(data);
-    } else if (this.inputRouter) {
+    } else {
       // Normal game mode - route through InputRouter
       this.inputRouter.process(data);
     }
