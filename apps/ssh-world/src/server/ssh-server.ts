@@ -101,7 +101,7 @@ export class SSHServer {
         // Format: "fp:FINGERPRINT.originaluser" where FINGERPRINT is base64 SHA256
         if (!userKey) {
           const proxyMatch = ctx.username.match(/^fp:([A-Za-z0-9_+/=]+)\./);
-          if (proxyMatch) {
+          if (proxyMatch && proxyMatch[1]) {
             // Proxied connection - fingerprint is in username
             // Convert from base64 to SHA256:base64 format to match our storage
             fingerprint = `SHA256:${proxyMatch[1].replace(/_/g, '/')}`;
