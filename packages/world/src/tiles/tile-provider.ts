@@ -1,8 +1,92 @@
 import type { Tile, Sprite, PlayerVisualState, PixelGrid, RGB, WorldDataProvider, Pixel, DirectionFrames, BuildingSprite, BuildingTile, BuildingDirection, NPCVisualState } from '@maldoror/protocol';
 import { CHUNK_SIZE_TILES, BASE_SIZE, RESOLUTIONS, isPositionInBuilding, getBuildingTileIndex } from '@maldoror/protocol';
-import { BASE_TILES, getTileById } from './base-tiles.js';
+import { BASE_TILES, getTileById, hasAITile } from './base-tiles.js';
 import { getRoadTileVariant } from './road-tiles.js';
 import { SeededRandom, ValueNoise } from '../noise/noise.js';
+
+/**
+ * Terrain transition pairs that we have generated tiles for
+ * Format: [from, to] - tiles exist for "from_to_to_*" patterns
+ */
+const TERRAIN_TRANSITIONS: [string, string][] = [
+  ['grass', 'water'],
+  ['grass', 'sand'],
+  ['grass', 'dirt'],
+  ['grass', 'stone'],
+  ['sand', 'water'],
+  ['dirt', 'sand'],
+  ['dirt', 'stone'],
+];
+
+/**
+ * Build transition tile ID based on neighbor configuration
+ * Returns null if no transition needed or no tile exists for this combination
+ */
+function getTransitionTileId(
+  baseTerrain: string,
+  northTerrain: string | null,
+  eastTerrain: string | null,
+  southTerrain: string | null,
+  westTerrain: string | null
+): string | null {
+  // Find all different neighbors
+  const differentNeighbors = new Set<string>();
+  if (northTerrain && northTerrain !== baseTerrain) differentNeighbors.add(northTerrain);
+  if (eastTerrain && eastTerrain !== baseTerrain) differentNeighbors.add(eastTerrain);
+  if (southTerrain && southTerrain !== baseTerrain) differentNeighbors.add(southTerrain);
+  if (westTerrain && westTerrain !== baseTerrain) differentNeighbors.add(westTerrain);
+
+  if (differentNeighbors.size === 0) return null;
+
+  // For simplicity, pick the first different neighbor type we find
+  // (In complex cases with multiple different neighbors, use the most common one)
+  const targetTerrain = Array.from(differentNeighbors)[0]!;
+
+  // Check if we have this transition pair
+  const hasTransition = TERRAIN_TRANSITIONS.some(
+    ([from, to]) => (from === baseTerrain && to === targetTerrain)
+  );
+
+  if (!hasTransition) {
+    // Try reverse - maybe we have the opposite direction
+    const hasReverseTransition = TERRAIN_TRANSITIONS.some(
+      ([from, to]) => (from === targetTerrain && to === baseTerrain)
+    );
+    if (!hasReverseTransition) return null;
+
+    // Use reverse transition (swap perspective)
+    // If we're sand and neighbor is grass, use grass_to_sand from grass's perspective
+    // But we need sand_to_grass which doesn't exist, so skip
+    return null;
+  }
+
+  // Build the variant name based on which edges have the target terrain
+  // Bit pattern: N=0b0001, E=0b0010, S=0b0100, W=0b1000
+  const hasN = northTerrain === targetTerrain;
+  const hasE = eastTerrain === targetTerrain;
+  const hasS = southTerrain === targetTerrain;
+  const hasW = westTerrain === targetTerrain;
+
+  // Build variant string in order: n, e, s, w (matching AUTOTILE_CONFIGS naming)
+  let orderedVariant = '';
+  if (hasN) orderedVariant += 'n';
+  if (hasE) orderedVariant += 'e';
+  if (hasS) orderedVariant += 's';
+  if (hasW) orderedVariant += 'w';
+
+  // Special case: if all 4 neighbors are the target, use "all"
+  if (hasN && hasE && hasS && hasW) orderedVariant = 'all';
+
+  // Build tile ID
+  const tileId = `${baseTerrain}_to_${targetTerrain}_${orderedVariant}`;
+
+  // Verify this tile exists
+  if (hasAITile(tileId)) {
+    return tileId;
+  }
+
+  return null;
+}
 
 /**
  * Rotate a pixel grid by 90 degrees clockwise
@@ -194,10 +278,25 @@ export class TileProvider implements WorldDataProvider {
     const tileId = this.getTileId(tileX, tileY);
     if (!tileId) return null;
 
+    // Check neighbors for AI autotile transitions
+    const northId = this.getTileId(tileX, tileY - 1);
+    const eastId = this.getTileId(tileX + 1, tileY);
+    const southId = this.getTileId(tileX, tileY + 1);
+    const westId = this.getTileId(tileX - 1, tileY);
+
+    // Try to get an AI transition tile
+    const transitionTileId = getTransitionTileId(tileId, northId, eastId, southId, westId);
+    if (transitionTileId) {
+      const transitionTile = getTileById(transitionTileId);
+      if (transitionTile) {
+        return transitionTile;
+      }
+    }
+
     const baseTile = getTileById(tileId);
     if (!baseTile) return BASE_TILES.void ?? null;
 
-    // Check if we need edge blending (has different neighbor)
+    // Check if we need edge blending (has different neighbor) - fallback if no AI tiles
     if (this.useEdgeBlending && !baseTile.animated) {
       const needsBlend = this.hasDifferentNeighbor(tileX, tileY, tileId);
       if (needsBlend) {

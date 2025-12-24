@@ -120,7 +120,7 @@ async function pixelGridToPng(grid: PixelGrid, width: number, height: number): P
 export interface ImageSpriteGenerationOptions {
   description: string;
   apiKey: string;
-  model?: 'dall-e-3' | 'dall-e-2' | 'gpt-image-1';
+  model?: 'dall-e-3' | 'dall-e-2' | 'gpt-image-1' | 'gpt-image-1-mini';
   quality?: 'low' | 'medium' | 'high' | 'auto';
   username?: string;
   onProgress?: (step: string, current: number, total: number) => void;
@@ -241,7 +241,7 @@ function flipAllResolutions(resolutions: Record<string, PixelGrid>): Record<stri
 export async function generateImageSprite(
   options: ImageSpriteGenerationOptions
 ): Promise<ImageSpriteGenerationResult> {
-  const { description, apiKey, model = 'gpt-image-1', quality = 'high', username = 'unknown', onProgress } = options;
+  const { description, apiKey, model = 'gpt-image-1-mini', quality = 'high', username = 'unknown', onProgress } = options;
 
   const openai = new OpenAI({ apiKey });
 

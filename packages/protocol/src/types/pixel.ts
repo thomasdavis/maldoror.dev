@@ -148,4 +148,14 @@ export interface WorldDataProvider {
   // Road methods (optional for backwards compatibility)
   hasRoadAt?(x: number, y: number): boolean;
   getRoadTileAt?(x: number, y: number): Tile | null;
+  // Terrain lighting methods (optional for backwards compatibility)
+  getBrightnessAt?(worldX: number, worldY: number): number;
+  generateBrightnessGrid?(
+    viewportX: number,
+    viewportY: number,
+    cellsWide: number,
+    cellsHigh: number,
+    tilesPerCellX?: number,
+    tilesPerCellY?: number
+  ): number[][];
 }

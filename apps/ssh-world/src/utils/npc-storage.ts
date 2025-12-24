@@ -42,7 +42,7 @@ export async function createNPC(data: NPCCreateData): Promise<NPCRecord> {
     spawnY: data.spawnY,
     roamRadius: data.roamRadius ?? 15,
     playerAffinity: data.playerAffinity ?? 50,
-    modelUsed: 'gpt-image-1',
+    modelUsed: 'gpt-image-1-mini',
   }).returning();
 
   if (!npcRecord) {

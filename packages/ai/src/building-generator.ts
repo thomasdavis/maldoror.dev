@@ -174,7 +174,7 @@ IMPORTANT: Features should ONLY appear on the sides where they existed in the re
 export interface BuildingGenerationOptions {
   description: string;
   apiKey: string;
-  model?: 'dall-e-3' | 'dall-e-2' | 'gpt-image-1';
+  model?: 'dall-e-3' | 'dall-e-2' | 'gpt-image-1' | 'gpt-image-1-mini';
   quality?: 'low' | 'medium' | 'high' | 'auto';
   username?: string;
   onProgress?: (step: string, current: number, total: number) => void;
@@ -342,7 +342,7 @@ async function processImageToSprite(
 export async function generateBuildingSprite(
   options: BuildingGenerationOptions
 ): Promise<BuildingGenerationResult> {
-  const { description, apiKey, model = 'gpt-image-1', quality = 'high', username = 'unknown', onProgress } = options;
+  const { description, apiKey, model = 'gpt-image-1-mini', quality = 'high', username = 'unknown', onProgress } = options;
 
   const openai = new OpenAI({ apiKey });
 
@@ -451,7 +451,7 @@ export interface GenerateDirectionsOptions {
   referenceImage: Buffer;  // The north/front view as PNG buffer
   description: string;     // Building description for prompts
   apiKey: string;
-  model?: 'dall-e-3' | 'dall-e-2' | 'gpt-image-1';
+  model?: 'dall-e-3' | 'dall-e-2' | 'gpt-image-1' | 'gpt-image-1-mini';
   quality?: 'low' | 'medium' | 'high' | 'auto';
   onProgress?: (step: string, current: number, total: number) => void;
 }
@@ -472,7 +472,7 @@ export interface GenerateDirectionsResult {
 export async function generateMissingDirections(
   options: GenerateDirectionsOptions
 ): Promise<GenerateDirectionsResult> {
-  const { referenceImage, description, apiKey, model = 'gpt-image-1', quality = 'high', onProgress } = options;
+  const { referenceImage, description, apiKey, model = 'gpt-image-1-mini', quality = 'high', onProgress } = options;
 
   const openai = new OpenAI({ apiKey });
 

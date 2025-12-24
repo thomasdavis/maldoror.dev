@@ -149,6 +149,59 @@ export class ValueNoise {
   }
 
   /**
+   * Domain warping - warp coordinates before sampling
+   * This creates more natural-looking terrain with coastlines, ridges, and coves
+   * instead of blobby noise patterns
+   *
+   * @param x - World X coordinate
+   * @param y - World Y coordinate
+   * @param warpStrength - How much to warp (20 is a good default)
+   * @param frequency - Base sampling frequency (default 0.05 matches terrain)
+   */
+  sampleWarped(
+    x: number,
+    y: number,
+    warpStrength: number = 20,
+    frequency: number = 0.05
+  ): number {
+    // Sample low-frequency warp field (offset to avoid self-correlation)
+    const warpFreq = frequency * 0.2; // Much lower frequency for smooth warping
+    const wx = this.sample(x * warpFreq, y * warpFreq);
+    const wy = this.sample(x * warpFreq + 100, y * warpFreq + 100);
+
+    // Warp coordinates
+    const warpedX = x + (wx - 0.5) * warpStrength;
+    const warpedY = y + (wy - 0.5) * warpStrength;
+
+    // Sample elevation at warped coordinates
+    return this.sample(warpedX * frequency, warpedY * frequency);
+  }
+
+  /**
+   * FBM with domain warping for more natural terrain
+   */
+  fbmWarped(
+    x: number,
+    y: number,
+    warpStrength: number = 20,
+    octaves: number = 4,
+    lacunarity: number = 2,
+    persistence: number = 0.5
+  ): number {
+    // Sample low-frequency warp field
+    const warpFreq = 0.01;
+    const wx = this.sample(x * warpFreq, y * warpFreq);
+    const wy = this.sample(x * warpFreq + 100, y * warpFreq + 100);
+
+    // Warp coordinates
+    const warpedX = x + (wx - 0.5) * warpStrength;
+    const warpedY = y + (wy - 0.5) * warpStrength;
+
+    // Sample FBM at warped coordinates
+    return this.fbm(warpedX, warpedY, octaves, lacunarity, persistence);
+  }
+
+  /**
    * Clear cache
    */
   clearCache(): void {

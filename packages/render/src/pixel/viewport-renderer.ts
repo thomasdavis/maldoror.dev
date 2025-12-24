@@ -42,6 +42,7 @@ export interface TextOverlay {
 export interface ViewportRenderResult {
   buffer: PixelGrid;
   overlays: TextOverlay[];
+  brightnessGrid?: number[][];  // Cell-level brightness for lighting
 }
 
 // Re-export for convenience
@@ -353,9 +354,40 @@ export class ViewportRenderer {
     // 4. Render players and NPCs together (sorted by Y for proper overlap)
     this.renderEntities(buffer, world, tick, origin);
 
+    // 5. Generate brightness grid if world supports it
+    let brightnessGrid: number[][] | undefined;
+    if (world.generateBrightnessGrid) {
+      // Calculate cell dimensions based on render mode
+      // For braille: 2 pixels wide, 4 pixels tall per cell
+      // For halfblock: 1 pixel wide, 2 pixels tall per cell
+      // We'll use braille dimensions as the default
+      const cellWidth = 2;
+      const cellHeight = 4;
+      const cellsWide = Math.ceil(pixelWidth / cellWidth);
+      const cellsHigh = Math.ceil(pixelHeight / cellHeight);
+
+      // Convert viewport origin from pixels to tiles
+      const originTileX = Math.floor(this.cameraCenterX / this.tileRenderSize) - Math.floor(this.config.widthTiles / 2);
+      const originTileY = Math.floor(this.cameraCenterY / this.tileRenderSize) - Math.floor(this.config.heightTiles / 2);
+
+      // Tiles per cell (approximate, based on zoom level)
+      const tilesPerCellX = (cellWidth / this.tileRenderSize) || 1;
+      const tilesPerCellY = (cellHeight / this.tileRenderSize) || 1;
+
+      brightnessGrid = world.generateBrightnessGrid(
+        originTileX,
+        originTileY,
+        cellsWide,
+        cellsHigh,
+        tilesPerCellX,
+        tilesPerCellY
+      );
+    }
+
     return {
       buffer,
       overlays: this.pendingOverlays,
+      brightnessGrid,
     };
   }
 
