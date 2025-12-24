@@ -620,9 +620,10 @@ export class WorkerManager {
         stdio: ['pipe', 'inherit', 'inherit', 'ipc'],
       });
 
+      // 60 second timeout to allow loading terrain tiles from database
       const timeout = setTimeout(() => {
         reject(new Error('Worker startup timeout'));
-      }, 10000);
+      }, 60000);
 
       const onReady = (msg: WorkerToMainMessage) => {
         if (msg.type === 'ready') {
