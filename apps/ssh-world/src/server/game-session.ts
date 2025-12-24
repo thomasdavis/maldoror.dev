@@ -12,7 +12,18 @@ import {
   ACCENT_GOLD,
   fg,
   bg,
+  type PerfOptimizations,
 } from '@maldoror/render';
+
+/**
+ * Performance optimizations configuration
+ * CRLE and foveated rendering enabled for bandwidth reduction
+ */
+const PERF_OPTIMIZATIONS: PerfOptimizations = {
+  crle: true,           // Chromatic Run-Length Encoding (~40-60% bandwidth reduction)
+  foveated: true,       // Zone-based update rates (peripheral at 4Hz, core at 60Hz)
+  enablePerfStats: false, // Set to true to log perf stats every 10s
+};
 import { TileProvider, createPlaceholderSprite } from '@maldoror/world';
 import type { Direction, AnimationFrame, PlayerVisualState, Sprite } from '@maldoror/protocol';
 import type { DirectionalBuildingSprite } from '@maldoror/ai';
@@ -236,6 +247,7 @@ export class GameSession {
       cols: this.cols,
       rows: this.rows,
       username: this.username,
+      optimizations: PERF_OPTIMIZATIONS,
     });
     boot.markPreviousDone();
 
@@ -787,6 +799,7 @@ export class GameSession {
       cols: this.cols,
       rows: this.rows,
       username: this.username,
+      optimizations: PERF_OPTIMIZATIONS,
     });
     this.renderer.initialize();
 
@@ -863,6 +876,7 @@ export class GameSession {
       cols: this.cols,
       rows: this.rows,
       username: this.username,
+      optimizations: PERF_OPTIMIZATIONS,
     });
     this.renderer.initialize();
 
@@ -899,7 +913,7 @@ export class GameSession {
         anchorX,
         anchorY,
         prompt,
-        modelUsed: this.providerConfig.model || 'gpt-image-1',
+        modelUsed: this.providerConfig.model || 'gpt-image-1-mini',
       })
       .returning({ id: schema.buildings.id });
 
@@ -995,6 +1009,7 @@ export class GameSession {
       cols: this.cols,
       rows: this.rows,
       username: this.username,
+      optimizations: PERF_OPTIMIZATIONS,
     });
     this.renderer.initialize();
 
