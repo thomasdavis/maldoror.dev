@@ -10,7 +10,7 @@ import type { PlayerInput, NPCVisualState, Sprite } from '@maldoror/protocol';
 import type { NPCCreateData } from '../utils/npc-storage.js';
 import type { ProviderConfig } from '@maldoror/ai';
 import { WorkerSession } from './worker-session.js';
-import { loadAllTerrainTilesFromDisk } from '../utils/terrain-storage.js';
+import { loadAllTerrainTilesFromDB } from '../utils/terrain-storage.js';
 import { setTerrainTiles } from '@maldoror/world';
 
 // Message types for IPC
@@ -314,11 +314,11 @@ process.on('message', async (msg: MainToWorkerMessage) => {
           send({ type: 'npc_created_broadcast', npc });
         });
 
-        // Load AI terrain tiles from disk (PNG files)
-        const terrainTiles = await loadAllTerrainTilesFromDisk();
+        // Load AI terrain tiles from database
+        const terrainTiles = await loadAllTerrainTilesFromDB();
         if (terrainTiles.size > 0) {
           setTerrainTiles(Array.from(terrainTiles.values()));
-          console.log(`[Worker] Loaded ${terrainTiles.size} AI terrain tiles`);
+          console.log(`[Worker] Loaded ${terrainTiles.size} AI terrain tiles from database`);
         }
 
         // Load NPCs from database

@@ -13,6 +13,7 @@ import {
   savePixelGridAsPng,
   loadPngAsPixelGrid,
 } from './png-storage.js';
+import { db, schema } from '@maldoror/db';
 
 // Directory for terrain tile PNGs
 const TERRAIN_DIR = 'data/terrain';
@@ -221,4 +222,40 @@ export async function deleteTerrainTileFromDisk(tileId: string): Promise<void> {
     await fs.promises.rm(tileDir, { recursive: true });
     console.log(`[Terrain] Deleted ${tileId}`);
   }
+}
+
+/**
+ * Load all terrain tiles from the database
+ * Returns a map of tile ID to Tile
+ */
+export async function loadAllTerrainTilesFromDB(): Promise<Map<string, Tile>> {
+  const tiles = new Map<string, Tile>();
+
+  try {
+    const dbTiles = await db.select().from(schema.terrainTiles);
+
+    for (const dbTile of dbTiles) {
+      try {
+        const tile: Tile = {
+          id: dbTile.id,
+          name: dbTile.name,
+          pixels: JSON.parse(dbTile.pixels) as PixelGrid,
+          walkable: dbTile.walkable,
+          resolutions: dbTile.resolutions ? JSON.parse(dbTile.resolutions) : undefined,
+          animated: dbTile.animated || false,
+          animationFrames: dbTile.animationFrames ? JSON.parse(dbTile.animationFrames) : undefined,
+          animationResolutions: dbTile.animationResolutions ? JSON.parse(dbTile.animationResolutions) : undefined,
+        };
+        tiles.set(tile.id, tile);
+      } catch (parseError) {
+        console.error(`[Terrain] Failed to parse tile ${dbTile.id}:`, parseError);
+      }
+    }
+
+    console.log(`[Terrain] Loaded ${tiles.size} AI terrain tiles from database`);
+  } catch (error) {
+    console.error('[Terrain] Failed to load tiles from database:', error);
+  }
+
+  return tiles;
 }
