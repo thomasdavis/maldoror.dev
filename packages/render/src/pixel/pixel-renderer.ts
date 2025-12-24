@@ -69,6 +69,12 @@ export interface TerminalCell {
 export type CellGrid = TerminalCell[][];
 
 /**
+ * A 2D grid of brightness values for cell-level lighting
+ * Each value represents brightness for a single terminal cell (0.7-1.2 typical)
+ */
+export type BrightnessGrid = number[][];
+
+/**
  * Check if two colors are equal
  */
 export function colorsEqual(a: RGB | null, b: RGB | null): boolean {
@@ -217,11 +223,26 @@ function averagePixels(pixels: Pixel[]): RGB {
 }
 
 /**
+ * Apply brightness multiplier to an RGB color
+ * Clamps result to [0, 255] range
+ */
+function applyBrightness(color: RGB, brightness: number): RGB {
+  return {
+    r: Math.min(255, Math.max(0, Math.round(color.r * brightness))),
+    g: Math.min(255, Math.max(0, Math.round(color.g * brightness))),
+    b: Math.min(255, Math.max(0, Math.round(color.b * brightness))),
+  };
+}
+
+/**
  * Render a 2x4 pixel block as a single Braille character
  * Returns the character and the foreground/background colors to use
+ * @param block - 4 rows × 2 cols of pixels
+ * @param cellBrightness - Optional brightness multiplier (0.7-1.2 typical, default 1.0)
  */
 function renderBrailleChar(
-  block: Pixel[][]  // 4 rows × 2 cols
+  block: Pixel[][],  // 4 rows × 2 cols
+  cellBrightness: number = 1.0
 ): { char: string; fg: RGB; bg: RGB } {
   // Collect all pixels and their brightness
   const allPixels: { pixel: Pixel; brightness: number; row: number; col: number }[] = [];
@@ -258,8 +279,14 @@ function renderBrailleChar(
   }
 
   // Calculate average colors for fg and bg
-  const fg = averagePixels(fgPixels);
-  const bg = averagePixels(bgPixels);
+  let fg = averagePixels(fgPixels);
+  let bg = averagePixels(bgPixels);
+
+  // Apply cell-level brightness if not default
+  if (cellBrightness !== 1.0) {
+    fg = applyBrightness(fg, cellBrightness);
+    bg = applyBrightness(bg, cellBrightness);
+  }
 
   // Generate Braille character
   const char = String.fromCharCode(BRAILLE_BASE + brailleCode);
@@ -458,6 +485,36 @@ export function quantizeColor(color: RGB, bits: number): RGB {
 }
 
 /**
+ * Bayer 4x4 ordered dithering matrix
+ * Normalized to [-0.5, 0.5] range for threshold modification
+ */
+const BAYER_4X4: number[][] = [
+  [ 0,  8,  2, 10],
+  [12,  4, 14,  6],
+  [ 3, 11,  1,  9],
+  [15,  7, 13,  5],
+].map(row => row.map(v => (v / 16) - 0.5));
+
+/**
+ * Quantize a color with ordered dithering
+ * Uses Bayer 4x4 matrix to add structured noise before quantization
+ * This reduces visible banding in gradients
+ */
+export function quantizeColorDithered(color: RGB, bits: number, x: number, y: number): RGB {
+  if (bits >= 8) return color;
+
+  const dither = BAYER_4X4[y & 3]![x & 3]! * (256 >> bits);
+  const shift = 8 - bits;
+  const mask = (0xFF << shift) & 0xFF;
+
+  return {
+    r: Math.max(0, Math.min(255, Math.round(color.r + dither))) & mask,
+    g: Math.max(0, Math.min(255, Math.round(color.g + dither))) & mask,
+    b: Math.max(0, Math.min(255, Math.round(color.b + dither))) & mask,
+  };
+}
+
+/**
  * Quantize all colors in a pixel grid
  * Reduces unique colors for better ANSI deduplication
  */
@@ -465,6 +522,17 @@ export function quantizeGrid(grid: PixelGrid, bits: number): PixelGrid {
   if (bits >= 8) return grid;
   return grid.map(row =>
     row.map(pixel => pixel === null ? null : quantizeColor(pixel, bits))
+  );
+}
+
+/**
+ * Quantize all colors in a pixel grid with ordered dithering
+ * Uses Bayer matrix to reduce banding in gradients
+ */
+export function quantizeGridDithered(grid: PixelGrid, bits: number): PixelGrid {
+  if (bits >= 8) return grid;
+  return grid.map((row, y) =>
+    row.map((pixel, x) => pixel === null ? null : quantizeColorDithered(pixel, bits, x, y))
   );
 }
 
@@ -532,10 +600,13 @@ export function renderNormalGridCells(grid: PixelGrid): CellGrid {
 /**
  * Render a pixel grid to a cell grid using half-block mode
  * Each cell represents 2 vertical pixels (1 char width)
+ * @param grid - The pixel grid to render
+ * @param brightnessGrid - Optional grid of brightness values per cell (indexed by cell x,y)
  */
-export function renderHalfBlockGridCells(grid: PixelGrid): CellGrid {
+export function renderHalfBlockGridCells(grid: PixelGrid, brightnessGrid?: BrightnessGrid): CellGrid {
   const result: CellGrid = [];
 
+  let cellY = 0;
   for (let y = 0; y < grid.length; y += 2) {
     const topRow = grid[y] ?? [];
     const bottomRow = grid[y + 1] ?? [];
@@ -546,13 +617,26 @@ export function renderHalfBlockGridCells(grid: PixelGrid): CellGrid {
       const topPixel = topRow[i] ?? null;
       const bottomPixel = bottomRow[i] ?? null;
 
+      // Get cell brightness from grid if provided
+      const cellBrightness = brightnessGrid?.[cellY]?.[i] ?? 1.0;
+
+      let fgColor = topPixel ?? DEFAULT_BG;
+      let bgColor = bottomPixel ?? DEFAULT_BG;
+
+      // Apply brightness if not default
+      if (cellBrightness !== 1.0) {
+        fgColor = applyBrightness(fgColor, cellBrightness);
+        bgColor = applyBrightness(bgColor, cellBrightness);
+      }
+
       cellRow.push({
         char: HALF_BLOCK_TOP,
-        fgColor: topPixel ?? DEFAULT_BG,
-        bgColor: bottomPixel ?? DEFAULT_BG,
+        fgColor,
+        bgColor,
       });
     }
     result.push(cellRow);
+    cellY++;
   }
 
   return result;
@@ -561,16 +645,20 @@ export function renderHalfBlockGridCells(grid: PixelGrid): CellGrid {
 /**
  * Render a pixel grid to a cell grid using braille mode
  * Each cell represents 2×4 pixels (8 subpixels per character)
+ * @param grid - The pixel grid to render
+ * @param brightnessGrid - Optional grid of brightness values per cell (indexed by cell x,y)
  */
-export function renderBrailleGridCells(grid: PixelGrid): CellGrid {
+export function renderBrailleGridCells(grid: PixelGrid, brightnessGrid?: BrightnessGrid): CellGrid {
   const result: CellGrid = [];
   const height = grid.length;
   const width = grid[0]?.length ?? 0;
 
+  let cellY = 0;
   // Process 4 rows at a time (Braille is 2×4)
   for (let y = 0; y < height; y += 4) {
     const cellRow: TerminalCell[] = [];
 
+    let cellX = 0;
     // Process 2 columns at a time
     for (let x = 0; x < width; x += 2) {
       // Extract 2×4 block
@@ -583,16 +671,194 @@ export function renderBrailleGridCells(grid: PixelGrid): CellGrid {
         block.push(row);
       }
 
-      const { char, fg, bg } = renderBrailleChar(block);
+      // Get cell brightness from grid if provided
+      const cellBrightness = brightnessGrid?.[cellY]?.[cellX] ?? 1.0;
+
+      const { char, fg, bg } = renderBrailleChar(block, cellBrightness);
       cellRow.push({
         char,
         fgColor: fg,
         bgColor: bg,
       });
+      cellX++;
     }
 
     result.push(cellRow);
+    cellY++;
   }
 
   return result;
+}
+
+// ============================================
+// CRLE (Chromatic Run-Length Encoding) Renderer
+// ============================================
+
+/**
+ * Color key for grouping cells by color
+ */
+function colorKey(fg: RGB | null, bg: RGB | null): string {
+  const fgStr = fg ? `${fg.r},${fg.g},${fg.b}` : 'null';
+  const bgStr = bg ? `${bg.r},${bg.g},${bg.b}` : 'null';
+  return `${fgStr}|${bgStr}`;
+}
+
+/**
+ * Cell position for CRLE rendering
+ */
+interface CRLECell {
+  x: number;
+  y: number;
+  char: string;
+}
+
+/**
+ * Color group for CRLE rendering
+ */
+interface CRLEColorGroup {
+  fgColor: RGB | null;
+  bgColor: RGB | null;
+  cells: CRLECell[];
+}
+
+/**
+ * CRLE render result with stats
+ */
+export interface CRLERenderResult {
+  output: string;
+  colorGroups: number;
+  bytesWithoutCRLE: number;
+  bytesWithCRLE: number;
+}
+
+/**
+ * Render changed cells using CRLE (Chromatic Run-Length Encoding)
+ *
+ * Instead of rendering left-to-right with frequent color changes,
+ * group cells by color and render all cells of each color together.
+ * This reduces ANSI escape code overhead significantly.
+ *
+ * @param cells - Current frame's cell grid
+ * @param previousCells - Previous frame's cell grid for diffing
+ * @param headerRows - Number of header rows to offset terminal positions
+ * @param renderMode - 'normal' uses 2-char cells, others use 1-char
+ * @returns CRLE render result with output string and stats
+ */
+export function renderCRLE(
+  cells: CellGrid,
+  previousCells: CellGrid,
+  headerRows: number,
+  renderMode: 'normal' | 'halfblock' | 'braille' = 'halfblock'
+): CRLERenderResult {
+  // Group changed cells by color
+  const colorGroups = new Map<string, CRLEColorGroup>();
+  let totalChangedCells = 0;
+
+  for (let y = 0; y < cells.length; y++) {
+    const row = cells[y];
+    const prevRow = previousCells[y];
+    if (!row) continue;
+
+    for (let x = 0; x < row.length; x++) {
+      const cell = row[x];
+      const prevCell = prevRow?.[x];
+
+      // Skip unchanged cells
+      if (!cell || cellsEqual(cell, prevCell)) continue;
+
+      totalChangedCells++;
+      const key = colorKey(cell.fgColor, cell.bgColor);
+
+      let group = colorGroups.get(key);
+      if (!group) {
+        group = {
+          fgColor: cell.fgColor,
+          bgColor: cell.bgColor,
+          cells: [],
+        };
+        colorGroups.set(key, group);
+      }
+
+      group.cells.push({ x, y, char: cell.char });
+    }
+  }
+
+  // If nothing changed, return empty
+  if (colorGroups.size === 0) {
+    return {
+      output: '',
+      colorGroups: 0,
+      bytesWithoutCRLE: 0,
+      bytesWithCRLE: 0,
+    };
+  }
+
+  // Build CRLE output: set color once, then emit all positions for that color
+  const chunks: string[] = [];
+
+  // Sort groups by cell count (render larger groups first for better perceived performance)
+  const sortedGroups = Array.from(colorGroups.values()).sort(
+    (a, b) => b.cells.length - a.cells.length
+  );
+
+  for (const group of sortedGroups) {
+    // Set colors once for this group
+    if (group.fgColor) {
+      chunks.push(fgColor(group.fgColor));
+    }
+    if (group.bgColor) {
+      chunks.push(bgColor(group.bgColor));
+    }
+
+    // Sort cells by position for optimal cursor movement
+    // Prioritize cells that can use relative movement
+    group.cells.sort((a, b) => {
+      if (a.y !== b.y) return a.y - b.y;
+      return a.x - b.x;
+    });
+
+    let lastX = -2;
+    let lastY = -1;
+
+    for (const cell of group.cells) {
+      // Calculate terminal position
+      const termCol = renderMode === 'normal' ? cell.x * 2 + 1 : cell.x + 1;
+      const termRow = cell.y + headerRows + 1;
+
+      // Use relative movement if possible (cursor right), otherwise absolute
+      if (lastY === cell.y && lastX === cell.x - 1) {
+        // Contiguous - no cursor movement needed
+      } else if (lastY === cell.y && cell.x > lastX && cell.x - lastX <= 3) {
+        // Same row, small gap - use cursor forward (shorter than absolute)
+        const spaces = renderMode === 'normal' ? (cell.x - lastX - 1) * 2 : cell.x - lastX - 1;
+        if (spaces > 0) {
+          chunks.push(`${ESC}[${spaces}C`);
+        }
+      } else {
+        // Jump to absolute position
+        chunks.push(`${ESC}[${termRow};${termCol}H`);
+      }
+
+      chunks.push(cell.char);
+      lastX = cell.x;
+      lastY = cell.y;
+    }
+  }
+
+  chunks.push(`${ESC}[0m`);  // Reset at end
+
+  const output = chunks.join('');
+
+  // Calculate comparison bytes (what traditional rendering would use)
+  // Traditional: for each cell, potentially emit fg + bg + position + char
+  // Estimate ~25 bytes per cell with color changes
+  const bytesWithoutCRLE = totalChangedCells * 25;
+  const bytesWithCRLE = Buffer.byteLength(output, 'utf8');
+
+  return {
+    output,
+    colorGroups: colorGroups.size,
+    bytesWithoutCRLE,
+    bytesWithCRLE,
+  };
 }

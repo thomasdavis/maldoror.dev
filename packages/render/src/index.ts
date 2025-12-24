@@ -63,7 +63,11 @@ export {
   type PixelGameRendererConfig,
   type GameWorldAdapter,
   type RenderMode,
+  type PerfOptimizations,
 } from './pixel/pixel-game-renderer.js';
+
+// Performance stats
+export { perfStats, type PerfStats } from './pixel/perf-stats.js';
 
 // Transport (backpressure handling)
 export { OutputPump, type OutputPumpMetrics } from './transport/index.js';

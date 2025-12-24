@@ -6,7 +6,7 @@ import {
   renderPixelRow,
   renderHalfBlockGrid,
   renderBrailleGrid,
-  quantizeGrid,
+  quantizeGridDithered,
   renderNormalGridCells,
   renderHalfBlockGridCells,
   renderBrailleGridCells,
@@ -14,8 +14,10 @@ import {
   colorsEqual,
   fgColor,
   bgColor,
+  renderCRLE,
   type CellGrid,
 } from './pixel-renderer.js';
+import { perfStats } from './perf-stats.js';
 import { BG_PRIMARY, BG_TERTIARY, fg, bg, ACCENT_CYAN, ACCENT_GOLD, TEXT_SECONDARY, BORDER_DIM, RESET } from '../brand.js';
 
 // Re-export for convenience
@@ -69,6 +71,15 @@ const DEFAULT_LAYOUT: LayoutConfig = {
 export type RenderMode = 'normal' | 'halfblock' | 'braille';
 
 /**
+ * Performance optimization options
+ */
+export interface PerfOptimizations {
+  crle?: boolean;           // Chromatic Run-Length Encoding (default: true)
+  foveated?: boolean;       // Foveated temporal rendering (default: false)
+  enablePerfStats?: boolean; // Enable performance logging (default: false)
+}
+
+/**
  * Configuration for PixelGameRenderer
  */
 export interface PixelGameRendererConfig {
@@ -79,6 +90,7 @@ export interface PixelGameRendererConfig {
   zoomLevel?: number;  // Zoom percentage: 100 = full resolution, 50 = half resolution (sees more world)
   renderMode?: RenderMode;  // Rendering mode (default: 'braille' for max resolution)
   layout?: Partial<LayoutConfig>;  // Optional layout configuration (reserves space for UI elements)
+  optimizations?: PerfOptimizations;  // Performance optimizations
 }
 
 /**
@@ -128,6 +140,8 @@ export class PixelGameRenderer {
   private statsBarCache: string = '';
   private statsBarLastRender: number = 0;
   private readonly STATS_BAR_TTL_MS = 1000;  // 1Hz update
+  // Performance optimizations
+  private useCRLE: boolean = true;  // CRLE enabled by default
 
   constructor(config: PixelGameRendererConfig) {
     this.stream = config.stream;
@@ -137,6 +151,13 @@ export class PixelGameRenderer {
     this.renderMode = config.renderMode ?? 'halfblock';  // Default to halfblock for good balance
     this.zoomLevel = config.zoomLevel ?? 100;  // Default to 100% zoom (most zoomed in)
     this.layout = { ...DEFAULT_LAYOUT, ...config.layout };  // Merge with defaults
+
+    // Initialize performance optimizations
+    const opts = config.optimizations ?? {};
+    this.useCRLE = opts.crle !== false;  // CRLE enabled by default
+    if (opts.enablePerfStats) {
+      perfStats.enable();
+    }
 
     // Calculate viewport size based on terminal size minus layout reservations
     const { availableCols, availableRows } = this.getViewportArea();
@@ -289,6 +310,9 @@ export class PixelGameRenderer {
   cleanup(): void {
     if (!this.initialized) return;
 
+    // Disable performance stats
+    perfStats.disable();
+
     const cleanup = [
       `${ESC}[?1049l`,      // Exit alternate screen
       `${ESC}[?25h`,        // Show cursor
@@ -298,6 +322,35 @@ export class PixelGameRenderer {
 
     this.stream.write(cleanup);
     this.initialized = false;
+  }
+
+  /**
+   * Enable or disable CRLE (Chromatic Run-Length Encoding)
+   */
+  setCRLE(enabled: boolean): void {
+    this.useCRLE = enabled;
+    console.log(`[PerfOpt] CRLE ${enabled ? 'enabled' : 'disabled'}`);
+  }
+
+  /**
+   * Check if CRLE is enabled
+   */
+  isCRLEEnabled(): boolean {
+    return this.useCRLE;
+  }
+
+  /**
+   * Enable performance stats logging
+   */
+  enablePerfStats(intervalMs: number = 10000): void {
+    perfStats.enable(intervalMs);
+  }
+
+  /**
+   * Disable performance stats logging
+   */
+  disablePerfStats(): void {
+    perfStats.disable();
   }
 
   /**
@@ -381,27 +434,29 @@ export class PixelGameRenderer {
     // Generate stats bar
     const statsBar = this.renderStatsBar();
 
-    // Render viewport to raw pixel buffer with overlays (already at correct resolution)
-    const { buffer, overlays } = this.viewportRenderer.renderToBuffer(world, this.tickCount);
+    // Render viewport to raw pixel buffer with overlays and brightness grid
+    const { buffer, overlays, brightnessGrid } = this.viewportRenderer.renderToBuffer(world, this.tickCount);
 
-    // Apply color quantization at high zoom levels to reduce ANSI codes
+    // Apply color quantization with ordered dithering at high zoom levels
+    // Dithering reduces visible banding in gradients while still reducing ANSI codes
     // At zoom > 50%, use 5-bit color (32 levels per channel)
     // At zoom > 70%, use 4-bit color (16 levels per channel)
     let quantizedBuffer = buffer;
     if (this.zoomLevel > 70) {
-      quantizedBuffer = quantizeGrid(buffer, 4);
+      quantizedBuffer = quantizeGridDithered(buffer, 4);
     } else if (this.zoomLevel > 50) {
-      quantizedBuffer = quantizeGrid(buffer, 5);
+      quantizedBuffer = quantizeGridDithered(buffer, 5);
     }
 
     // Convert to cell grid for cell-level diffing
+    // Pass brightness grid for cell-level lighting (braille/halfblock modes)
     let viewportCells: CellGrid;
     switch (this.renderMode) {
       case 'braille':
-        viewportCells = renderBrailleGridCells(quantizedBuffer);
+        viewportCells = renderBrailleGridCells(quantizedBuffer, brightnessGrid);
         break;
       case 'halfblock':
-        viewportCells = renderHalfBlockGridCells(quantizedBuffer);
+        viewportCells = renderHalfBlockGridCells(quantizedBuffer, brightnessGrid);
         break;
       case 'normal':
       default:
@@ -595,6 +650,7 @@ export class PixelGameRenderer {
    * Output frame using cell-level diffing for minimal bandwidth
    * Only emits ANSI codes for cells that changed since last frame
    * OPTIMIZED: Uses array chunks and reference swap instead of deep copy
+   * CRLE: When enabled, groups cells by color before rendering
    */
   private outputFrameCellDiff(
     statsBar: string,
@@ -618,6 +674,22 @@ export class PixelGameRenderer {
       // Full redraw - write all cells
       chunks.push(this.renderAllCells(viewportCells));
       this.forceRedraw = false;
+    } else if (this.useCRLE) {
+      // CRLE: Group cells by color for minimal escape code overhead
+      const crleResult = renderCRLE(
+        viewportCells,
+        this.previousCells,
+        this.layout.headerRows,
+        this.renderMode
+      );
+      chunks.push(crleResult.output);
+
+      // Record CRLE stats
+      perfStats.recordCRLE(
+        crleResult.colorGroups,
+        crleResult.bytesWithoutCRLE,
+        crleResult.bytesWithCRLE
+      );
     } else {
       // Cell-level diff - only write changed cells
       chunks.push(this.renderChangedCells(viewportCells));
@@ -899,12 +971,12 @@ export class PixelGameRenderer {
     // Render viewport to raw pixel buffer with overlays (already at correct resolution)
     const { buffer, overlays } = this.viewportRenderer.renderToBuffer(world, this.tickCount);
 
-    // Apply color quantization at high zoom levels to reduce ANSI codes
+    // Apply color quantization with dithering at high zoom levels to reduce ANSI codes
     let quantizedBuffer = buffer;
     if (this.zoomLevel > 70) {
-      quantizedBuffer = quantizeGrid(buffer, 4);
+      quantizedBuffer = quantizeGridDithered(buffer, 4);
     } else if (this.zoomLevel > 50) {
-      quantizedBuffer = quantizeGrid(buffer, 5);
+      quantizedBuffer = quantizeGridDithered(buffer, 5);
     }
 
     // Convert to ANSI lines based on render mode
