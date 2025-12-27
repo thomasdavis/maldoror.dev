@@ -87,19 +87,44 @@ export class SSHServer {
       didAttemptAuth = true;
 
       if (ctx.method === 'publickey') {
-        // Extract fingerprint
-        const fingerprint = this.extractFingerprint(ctx.key);
-        context.fingerprint = fingerprint;
-        console.log(`Auth attempt from ${info.ip} (key: ${fingerprint.slice(0, 16)}...)`);
-        // Don't use ctx.username - that's the computer's username
-        // Username will be set from database for returning users, or onboarding for new users
-        context.username = '';
+        // Default: extract fingerprint directly from the SSH key
+        let fingerprint = this.extractFingerprint(ctx.key);
+        let isProxied = false;
 
-        // Look up user by fingerprint
-        const userKey = await db.query.userKeys.findFirst({
+        // Look up user by direct key fingerprint first
+        let userKey = await db.query.userKeys.findFirst({
           where: eq(schema.userKeys.fingerprintSha256, fingerprint),
           with: { user: true },
         });
+
+        // Fallback: check if fingerprint is passed via username from sshpiper proxy
+        // Format: "fp:FINGERPRINT.originaluser" where FINGERPRINT is base64 SHA256
+        if (!userKey) {
+          const proxyMatch = ctx.username.match(/^fp:([A-Za-z0-9_+/=]+)\./);
+          if (proxyMatch && proxyMatch[1]) {
+            // Proxied connection - fingerprint is in username
+            // Convert from base64 to SHA256:base64 format to match our storage
+            fingerprint = `SHA256:${proxyMatch[1].replace(/_/g, '/')}`;
+            isProxied = true;
+
+            // Look up user by proxied fingerprint
+            userKey = await db.query.userKeys.findFirst({
+              where: eq(schema.userKeys.fingerprintSha256, fingerprint),
+              with: { user: true },
+            });
+          }
+        }
+
+        if (isProxied) {
+          console.log(`Proxied auth from ${info.ip} (fingerprint in username: ${fingerprint.slice(0, 20)}...)`);
+        } else {
+          console.log(`Direct auth from ${info.ip} (key: ${fingerprint.slice(0, 16)}...)`);
+        }
+
+        context.fingerprint = fingerprint;
+        // Don't use ctx.username - that's the computer's username (or proxy format)
+        // Username will be set from database for returning users, or onboarding for new users
+        context.username = '';
 
         if (userKey && userKey.user) {
           context.userId = userKey.userId;
